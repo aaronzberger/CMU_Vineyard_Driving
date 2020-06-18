@@ -12,7 +12,7 @@ public:
     void setD(double d);
     void setF(double f);
     void setPID(double p, double i, double d, double f = 0);
-    void setMaxIOutput(double maxI);
+    void setMaxIOutput(double maxIOutput);
     void setMaxOutput(double maxOutput);
     void setSetPoint(double setPoint);
     void setInverted(bool inverted);
@@ -29,10 +29,14 @@ private:
     double errorSum;
 
     double maxIOutput;
+
     double maxOutput;
+    double minOutput;
 
     bool firstLoop;
     bool inverted;
+
+    double lastSensorData;
 };
 
 #endif
