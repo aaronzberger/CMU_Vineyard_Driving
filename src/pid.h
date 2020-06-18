@@ -13,7 +13,7 @@ public:
     void setF(double f);
     void setPID(double p, double i, double d, double f = 0);
     void setMaxIOutput(double maxIOutput);
-    void setMaxOutput(double maxOutput);
+    void setOutputLimits(double minOutput, double maxOutput);
     void setSetPoint(double setPoint);
     void setInverted(bool inverted);
 
@@ -21,12 +21,17 @@ public:
     double calculate(double sensorData);
 
 private:
+    void checkGainSigns();
+
+    static constexpr double nan{std::numeric_limits<double>::quiet_NaN()};
+
     //GAINS
     double kP, kI, kD, kF;
     
     double setPoint;
 
     double errorSum;
+    double maxError;
 
     double maxIOutput;
 

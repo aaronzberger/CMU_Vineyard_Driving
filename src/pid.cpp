@@ -1,27 +1,45 @@
 #include "pid.h"
 #include <limits>
 #include <algorithm>
+#include <cmath>
+#include <math.h>
 
 PID::PID(double p = 0, double i = 0, double d = 0, double f = 0) 
-    : kP{p}, kI{i}, kD{d}, kF{f}, errorSum{0}, firstLoop{true},
-    setPoint{0}, maxIOutput{0}, inverted{false},
-    maxOutput{std::numeric_limits<double>::max()}, 
-    minOutput{std::numeric_limits<double>::min()} {}
+    :firstLoop{true}, inverted{false}, setPoint{nan}, 
+    maxOutput{nan}, minOutput{nan}, maxError{nan}, 
+    maxIOutput{nan}, lastSensorData{nan} {
+        setP(p);
+        setI(i);
+        setD(d);
+        setF(f);
+    }
 
 void PID::setP(double p) {
     kP = p;
+    checkGainSigns();
 }
 
 void PID::setI(double i) {
     kI = i;
+    //Scale the errorSum to smooth kI changing transition
+    if(i != 0) {
+        errorSum *= kI / i;
+    }
+    //Set a maxError to avoid windup
+    if(maxIOutput != nan) {
+        maxError = maxIOutput / kI;
+    }
+    checkGainSigns();
 }
 
 void PID::setD(double d) {
     kD = d;
+    checkGainSigns();
 }
 
 void PID::setF(double f) {
     kF = f;
+    checkGainSigns();
 }
 
 void PID::setPID(double p, double i, double d, double f) {
@@ -33,10 +51,15 @@ void PID::setPID(double p, double i, double d, double f) {
 
 void PID::setMaxIOutput(double maxIOutput) {
     this->maxIOutput = maxIOutput;
+    //Set a maxError to avoid windup
+    if(maxIOutput != nan) {
+        maxError = maxIOutput / kI;
+    }
 }
 
-void PID::setMaxOutput(double maxOutput) {
+void PID::setOutputLimits(double minOutput, double maxOutput) {
     this->maxOutput = maxOutput;
+    this->minOutput = minOutput;
 }
 
 void PID::setSetPoint(double setPoint) {
@@ -48,27 +71,43 @@ void PID::setInverted(bool inverted) {
 }
 
 double PID::calculate(double sensorData, double setPoint) {
+    this->setPoint = setPoint;
+
     double error = sensorData - setPoint;
 
-    double pOutput{kP * error};
-
-    errorSum += sensorData;
-    double iOutput{kI * errorSum};
-
-    iOutput = std::clamp(iOutput, -maxIOutput, maxIOutput);
+    errorSum += error;
+    if(maxError != nan) {
+        errorSum = std::clamp(errorSum, -maxError, maxError);
+    }
 
     if(firstLoop) {
         lastSensorData = sensorData;
         firstLoop = false;
     }
 
+    //Calculate P
+    double pOutput{kP * error};
+
+    //Calculate I
+    double iOutput{kI * errorSum};
+
+    if(maxIOutput != nan) {
+        iOutput = std::clamp(iOutput, -maxIOutput, maxIOutput);
+    }
+
+    //Calculate D
     double dOutput{(sensorData - lastSensorData) * kD * -1};
 
+    //Calculate F
     double fOutput{kF * setPoint};
 
+    //Calculate the total
     double totalOutput{pOutput + iOutput + dOutput + fOutput};
-
     totalOutput = std::clamp(totalOutput, -maxOutput, maxOutput);
+
+    lastSensorData = sensorData;
+
+    return totalOutput;
 }
 
 double PID::calculate(double sensorData) {
@@ -78,4 +117,18 @@ double PID::calculate(double sensorData) {
 void PID::reset() {
     errorSum = 0;
     firstLoop = true;
+}
+
+void PID::checkGainSigns() {
+    if(inverted) {
+        kP = -std::abs(kP);
+        kI = -std::abs(kI);
+        kD = -std::abs(kD);
+        kF = -std::abs(kF);
+    } else {
+        kP = std::abs(kP);
+        kI = std::abs(kI);
+        kD = std::abs(kD);
+        kF = std::abs(kF);
+    }
 }
