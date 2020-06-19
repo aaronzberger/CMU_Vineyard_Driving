@@ -1,9 +1,11 @@
 #ifndef PID_H
 #define PID_H
 
+#include <limits>
+
 class PID {
 public:
-    PID(double p, double i, double d, double f = 0);
+    PID(double p, double i, double d);
 
     void reset();
 
@@ -11,14 +13,14 @@ public:
     void setI(double i);
     void setD(double d);
     void setF(double f);
-    void setPID(double p, double i, double d, double f = 0);
+    void setPID(double p, double i, double d);
     void setMaxIOutput(double maxIOutput);
     void setOutputLimits(double minOutput, double maxOutput);
     void setSetPoint(double setPoint);
     void setInverted(bool inverted);
 
-    double calculate(double sensorData, double setPoint);
-    double calculate(double sensorData);
+    double calculate(double sensorData, double setPoint, double dt);
+    double calculate(double sensorData, double dt);
 
 private:
     void checkGainSigns();
@@ -26,11 +28,11 @@ private:
     static constexpr double nan{std::numeric_limits<double>::quiet_NaN()};
 
     //GAINS
-    double kP, kI, kD, kF;
+    double kP, kI, kD;
     
     double setPoint;
 
-    double errorSum;
+    double integral;
     double maxError;
 
     double maxIOutput;
@@ -42,6 +44,7 @@ private:
     bool inverted;
 
     double lastSensorData;
+    double lastTime;
 };
 
 #endif
