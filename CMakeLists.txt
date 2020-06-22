@@ -7,6 +7,9 @@ find_package(catkin REQUIRED COMPONENTS
   roscpp
 )
 
+find_package(PCL REQUIRED)
+
+
 ## System dependencies are found with CMake's conventions
 # find_package(Boost REQUIRED COMPONENTS system)
 
@@ -107,6 +110,7 @@ catkin_package(
 include_directories(
 # include
   ${catkin_INCLUDE_DIRS}
+  ${PCL_INCLUDE_DIRS}
 )
 
 ## Declare a C++ library
@@ -193,3 +197,6 @@ include_directories(
 
 ## Add folders to be run by python nosetests
 # catkin_add_nosetests(test)
+
+add_executable(wall_controller src/main.cpp)
+target_link_libraries(wall_controller ${catkin_LIBRARIES} ${PCL_LIBRARIES})
