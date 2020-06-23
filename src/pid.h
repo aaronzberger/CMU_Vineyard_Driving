@@ -6,13 +6,13 @@
 class PID {
 public:
     PID(double p, double i, double d);
+    PID() : PID(0.0, 0.0, 0.0) {};
 
     void reset();
 
     void setP(double p);
     void setI(double i);
     void setD(double d);
-    void setF(double f);
     void setPID(double p, double i, double d);
     void setMaxIOutput(double maxIOutput);
     void setOutputLimits(double minOutput, double maxOutput);
@@ -24,6 +24,7 @@ public:
 
 private:
     void checkGainSigns();
+    double clamp(double val, double low, double high);
 
     static constexpr double nan{std::numeric_limits<double>::quiet_NaN()};
 
