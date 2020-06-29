@@ -182,7 +182,7 @@ int main(int argc, char **argv) {
 
     if(argc != 4) {
         std::cout << "Expected 3 arguments: P, I, D" << std::endl;
-        return 0;
+        return -1;  // by convention, return a non-zero code to indicate error
     }
 
     ros::NodeHandle n;
