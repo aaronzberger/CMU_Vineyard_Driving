@@ -75,38 +75,19 @@ void odomCallback(const nav_msgs::Odometry::ConstPtr &msg) {
  */
 void velodyneCallBack(const PointCloud::ConstPtr &msg) {
     if(currentTime - lastMotionUpdate > 10) {
-        // Simple Linear Regression, using all points
-
-        // double slope, yInt, sumX, sumY, sumXY, sumX2;
-
-        // int numPoints {0};
-        // for(int i{0}; i < msg->width - 0; i++) {
-        //     if(isWallPoint(msg->points.at(i))) {
-        //         sumX += msg->points.at(i).x;
-        //         sumY += msg->points.at(i).y;
-        //         sumXY += msg->points.at(i).x * msg->points.at(i).y;
-        //         sumX2 += msg->points.at(i).x * msg->points.at(i).x;
-        //         numPoints++;
-        //     }
-        // }
-        // double xMean = sumX / numPoints;
-        // double yMean = sumY / numPoints;
-        // double denominator = sumX2 - sumX * xMean;
-        // slope = (sumXY - sumX * yMean) / denominator;
-        // yInt = yMean - slope * xMean;
-
-
         double slope {ransac(msg)};
 
         double angle {std::atan(slope)};
 
-        std::cout << "Relative Wall Angle: " << angle * (180 / 3.1415)  << std::endl;
+        //std::cout << "Theta: " << angle * (180 / 3.1415)  << std::endl;
 
         double angVel {controller.calculate(angle, currentTime)};
 
+        //std::cout << "PID Output: " << angVel << std::endl;
+
         geometry_msgs::Twist twist;
 
-        twist.linear.x = 0.2;
+        twist.linear.x = 0.4;
         twist.linear.y = 0;
         twist.linear.z = 0;
 
@@ -116,10 +97,6 @@ void velodyneCallBack(const PointCloud::ConstPtr &msg) {
 
         velPub.publish(twist);
         lastMotionUpdate = currentTime;
-
-        // for(int i {0}; i < msg->width; i++) {
-        //     std::cout << "(" << msg->points.at(i).x << ", " << msg->points.at(i).y << ", " << msg->points.at(i).z << ")" << std::endl;
-        // }
     }
 }
 
@@ -129,30 +106,31 @@ double ransac(const PointCloud::ConstPtr &pcl) {
 
     std::vector<double> bestFit {0, 0};
     double yint {0};
-    // std::cout << "Points: " << pcl->width << std::endl;
     for(int i{0}; i < numLoops; i++) {
-        int pt1Idx {std::rand() / ((RAND_MAX + 1u) / pcl->width)};
+        int pt1Idx {std::rand() / ((RAND_MAX) / (pcl->width - 1))};
         while(pcl->points.at(pt1Idx).z < 0.5) {
-            pt1Idx = std::rand() / ((RAND_MAX + 1u) / pcl->width);
+            pt1Idx = std::rand() / ((RAND_MAX) / (pcl->width - 1));
         }
-        int pt2Idx {std::rand() / ((RAND_MAX + 1u) / pcl->width)};
+        int pt2Idx {std::rand() / ((RAND_MAX) / (pcl->width - 1))};
         while(pcl->points.at(pt2Idx).z < 0.5 || pt2Idx == pt1Idx) {
-            pt2Idx = std::rand() / ((RAND_MAX + 1u) / pcl->width);
+            pt2Idx = std::rand() / ((RAND_MAX) / (pcl->width - 1));
         }
 
         double a {pcl->points.at(pt2Idx).y - pcl->points.at(pt1Idx).y};
         double b {pcl->points.at(pt1Idx).x - pcl->points.at(pt2Idx).x};
         double c {(a * pcl->points.at(pt1Idx).x) + (b * pcl->points.at(pt1Idx).y)};
         int inliers {0};
+
         // std::cout << "X1: " << pcl->points.at(pt1Idx).x << "Y1: " << pcl->points.at(pt1Idx).y <<
         //              "X2: " << pcl->points.at(pt2Idx).x << "Y2: " << pcl->points.at(pt2Idx).y << std::endl;
         // std::cout << "A: " << a << ", B: " << b << ", C: " << c << std::endl;
         // std::cout << "Slope: " << -(a / b) << ", Yint: " << c / b << std::endl;
+
         for(int j{0}; j < pcl->width; j++) {
             double distance {(std::abs((a * pcl->points.at(j).x) + (b * pcl->points.at(j).y) - c)) / (std::sqrt(a*a + b*b))};
             if(distance < inlierThreshold) inliers++;
         }
-        // std::cout << "Inliers: " << inliers << std::endl;
+        
         if(inliers > bestFit.at(1)) {
             bestFit.at(0) = -(a / b);
             bestFit.at(1) = inliers;
@@ -167,9 +145,7 @@ double ransac(const PointCloud::ConstPtr &pcl) {
     // std::cout << "--------------" << std::endl;
     // std::ofstream graphing("lineGraphing.csv");
     // for(int i{0}; i < pcl->width; i++) {
-    //     if(pcl->points.at(i).z > 0.5) {
     //         graphing << pcl->points.at(i).x << "," << pcl->points.at(i).y << "," << pcl->points.at(i).z << "\n";
-    //     }
     // }
     // graphing.close();
 
@@ -194,10 +170,12 @@ int main(int argc, char **argv) {
     ros::Subscriber subVelodyne = n.subscribe<PointCloud>("/velodyne_points", 1000, velodyneCallBack);
     velPub = n.advertise<geometry_msgs::Twist>("/cmd_vel", 1);
 
-    controller = PID(std::atof(argv[0]), std::atof(argv[1]), std::atof(argv[2]));
+    controller = PID(std::atof(argv[1]), std::atof(argv[2]), std::atof(argv[3]));
 
     controller.setInverted(false);
     controller.setSetPoint(0);
+    controller.setOutputLimits(-0.4, 0.4);
+    controller.setMaxIOutput(0.2);
 
     ros::spin();
 

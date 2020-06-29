@@ -150,6 +150,7 @@ double PID::calculate(double sensorData, double setPoint, double time) {
 
     //Calculate the total
     double totalOutput{pOutput + iOutput + dOutput};
+    //std::cout << "P: " << pOutput << " I: " << iOutput << " D" << dOutput << std::endl;
     totalOutput = clamp(totalOutput, -maxOutput, maxOutput);
     
     this->lastSensorData = sensorData;
