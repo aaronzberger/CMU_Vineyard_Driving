@@ -1,5 +1,5 @@
 # CMU_PID
-A PID-based controller to drive a Husky parallel to a wall using 3d Lidar data
+A PID-based controller to drive a Husky through a vineyard (or through other objects)
 
 To make this program accessible on your computer, clone this repository to your catkin workspace and compile.
 
