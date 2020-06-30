@@ -24,14 +24,15 @@
 typedef pcl::PointCloud<pcl::PointXYZ> PointCloud;
 
 void clockCallback(const rosgraph_msgs::Clock::ConstPtr &msg);
-bool isWallPoint(const pcl::PointXYZ &pt);
+bool isGroundPoint(const pcl::PointXYZ &pt);
 void odomCallback(const nav_msgs::Odometry::ConstPtr &msg);
 void velodyneCallBack(const PointCloud::ConstPtr &msg);
 std::vector<std::vector<double>> ransac(const PointCloud::ConstPtr &pcl);
 bool close(std::vector<double> line1, std::vector<double> line2);
+double lineToPtDistance(double x, double y, double a, double b, double c);
 
 
-double currentTime, yaw, lastMotionUpdate;
+double currentTime, yaw, x, y, lastMotionUpdate;
 ros::Publisher velPub;
 PID controller;
 
@@ -50,8 +51,8 @@ void clockCallback(const rosgraph_msgs::Clock::ConstPtr &msg) {
  * @param pt the point in the point cloud, containing an X, Y, and Z
  * @return a boolean representing whether the point is on a wall
  */
-bool isWallPoint(const pcl::PointXYZ &pt) {
-    return (!(pt.z > -0.375 && pt.z < -0.365));
+bool isGroundPoint(const pcl::PointXYZ &pt) {
+    return (pt.z > -0.375 && pt.z < -0.365);
 }
 
 /**
@@ -60,6 +61,9 @@ bool isWallPoint(const pcl::PointXYZ &pt) {
  * @param msg the message received from the odometry ros topic
  */
 void odomCallback(const nav_msgs::Odometry::ConstPtr &msg) {
+    x = msg->pose.pose.position.x;
+    y = msg->pose.pose.position.y;
+
     tf::Quaternion quat;
     quat.setW(msg->pose.pose.orientation.w);
     quat.setX(msg->pose.pose.orientation.x);
@@ -113,16 +117,16 @@ std::vector<std::vector<double>> ransac(const PointCloud::ConstPtr &pcl) {
     // }
 
     //Declare a vector that stores the {slope, yIntercept, inliers} for the best two lines
-    std::vector<std::vector<double>> bestFits { {0, 0, 0}, {0, 0, 0} };
+    std::vector<std::vector<double>> bestFits { {0, 0, 0, 0}, {0, 0, 0, 0} };
 
     double yint {0};
     for(int i{0}; i < numLoops; i++) {
         int pt1Idx {std::rand() / ((RAND_MAX) / (pcl->width - 1))};
-        while(pcl->points.at(pt1Idx).z < 0.0) {
+        while(isGroundPoint(pcl->points.at(pt1Idx))) {
             pt1Idx = std::rand() / ((RAND_MAX) / (pcl->width - 1));
         }
         int pt2Idx {std::rand() / ((RAND_MAX) / (pcl->width - 1))};
-        while(pcl->points.at(pt2Idx).z < 0.0 || pt2Idx == pt1Idx) {
+        while(isGroundPoint(pcl->points.at(pt2Idx)) || pt2Idx == pt1Idx) {
             pt2Idx = std::rand() / ((RAND_MAX) / (pcl->width - 1));
         }
 
@@ -137,28 +141,41 @@ std::vector<std::vector<double>> ransac(const PointCloud::ConstPtr &pcl) {
         // std::cout << "Slope: " << -(a / b) << ", Yint: " << c / b << std::endl;
 
         for(int j{0}; j < pcl->width; j++) {
-            double distance {(std::abs((a * pcl->points.at(j).x) + (b * pcl->points.at(j).y) - c)) / (std::sqrt(a*a + b*b))};
+            double distance {lineToPtDistance(pcl->points.at(j).x, pcl->points.at(j).y, a, b, c)};
             if(distance < inlierThreshold) inliers++;
         }
+
+        // std::cout << "Best lines: Slope1: " << bestFits.at(0).at(0) << " Yint1: " << bestFits.at(0).at(1) << " Slope2: " << bestFits.at(1).at(0) << " Yint2: " << bestFits.at(1).at(1) << std::endl;
         
-        // In order to properly store the best two lines, each new line must check if it is better than the currently worst line.
-        size_t worstLineIdx {bestFits.at(0).at(2) > bestFits.at(1).at(2) ? 1 : 0};
+        // To represent the line, {slope, yInt, inliers, distance to line}
+        double distanceToLine {lineToPtDistance(x, y, a, b, c)};
+        std::vector<double> newLine {(-(a/b)), (c/b), static_cast<double>(inliers), distanceToLine};
 
-        // To represent the line,   {   slope,  yInt, inliers                     }
-        std::vector<double> newLine {(-(a/b)), (c/b), static_cast<double>(inliers)};
+        if(close(bestFits.at(0), newLine) && inliers > bestFits.at(0).at(2)) {
+            bestFits.at(0) = newLine;
+        } else if(close(bestFits.at(1), newLine) && inliers > bestFits.at(1).at(2)) {
+            bestFits.at(1) = newLine;
+        } else {
+            size_t worstLineIdx {bestFits.at(0).at(2) > bestFits.at(1).at(2) ? 1 : 0};
+            if(inliers > bestFits.at(worstLineIdx).at(2) && !close(bestFits.at(1 - worstLineIdx), newLine)) {
+                bestFits.at(worstLineIdx) = newLine;
+            }
+        }
 
-        if(inliers > bestFits.at(worstLineIdx).at(2) && !close(bestFits.at(0), newLine) && !close(bestFits.at(1), newLine)) {
-            bestFits.at(worstLineIdx) = newLine;
+        if(close(bestFits.at(0), newLine)) {
+            if(inliers > bestFits.at(0).at(2)) {
+                bestFits.at(0) = newLine;
+            }
         }
     }
 
     // For testing, print valid points to a csv file for graphing
 
-    std::cout << "Final Slope: " << bestFits.at(0).at(0) << "Final Yint" << bestFits.at(0).at(1) << std::endl;
-    std::cout << "Inliers: " << bestFits.at(0).at(2) << std::endl;
+    std::cout << "Final Slope: " << bestFits.at(0).at(0) << " Final Yint" << bestFits.at(0).at(1) << std::endl;
+    std::cout << "Inliers: " << bestFits.at(0).at(2) << " Distance: " << bestFits.at(0).at(3) << std::endl;
 
-    std::cout << "Final Slope: " << bestFits.at(1).at(0) << "Final Yint" << bestFits.at(1).at(1) << std::endl;
-    std::cout << "Inliers: " << bestFits.at(1).at(2) << std::endl;
+    std::cout << "Final Slope: " << bestFits.at(1).at(0) << " Final Yint" << bestFits.at(1).at(1) << std::endl;
+    std::cout << "Inliers: " << bestFits.at(1).at(2) << " Distance: " << bestFits.at(1).at(3) << std::endl;
     std::cout << "--------------" << std::endl;
     std::ofstream graphing("lineGraphing.csv");
     for(int i{0}; i < pcl->width; i++) {
@@ -179,6 +196,10 @@ bool close(std::vector<double> line1, std::vector<double> line2) {
         return (std::abs(line1.at(1) - line2.at(1)) < 0.3);
     }
     return false;
+}
+
+double lineToPtDistance(double x, double y, double a, double b, double c) {
+    return (std::abs((a * x) + (b * y) - c)) / (std::sqrt(a*a + b*b));
 }
 
 
