@@ -27,7 +27,8 @@ void clockCallback(const rosgraph_msgs::Clock::ConstPtr &msg);
 bool isWallPoint(const pcl::PointXYZ &pt);
 void odomCallback(const nav_msgs::Odometry::ConstPtr &msg);
 void velodyneCallBack(const PointCloud::ConstPtr &msg);
-double ransac(const PointCloud::ConstPtr &pcl);
+std::vector<std::vector<double>> ransac(const PointCloud::ConstPtr &pcl);
+bool close(std::vector<double> line1, std::vector<double> line2);
 
 
 double currentTime, yaw, lastMotionUpdate;
@@ -75,9 +76,11 @@ void odomCallback(const nav_msgs::Odometry::ConstPtr &msg) {
  */
 void velodyneCallBack(const PointCloud::ConstPtr &msg) {
     if(currentTime - lastMotionUpdate > 10) {
-        double slope {ransac(msg)};
+        std::vector<std::vector<double>> lines {ransac(msg)};
 
-        double angle {std::atan(slope)};
+        double bestLineSlope {lines.at(0).at(2) > lines.at(1).at(2) ? lines.at(0).at(0) : lines.at(1).at(0)};
+
+        double angle {std::atan(bestLineSlope)};
 
         //std::cout << "Theta: " << angle * (180 / 3.1415)  << std::endl;
 
@@ -100,19 +103,26 @@ void velodyneCallBack(const PointCloud::ConstPtr &msg) {
     }
 }
 
-double ransac(const PointCloud::ConstPtr &pcl) {
+std::vector<std::vector<double>> ransac(const PointCloud::ConstPtr &pcl) {
     double inlierThreshold {0.1};
     int numLoops {250};
 
-    std::vector<double> bestFit {0, 0};
+    // Print the entire Point Cloud
+    // for(int i{0}; i < pcl->width; i++) {
+    //     std::cout << "X: " << pcl->points.at(i).x << " Y: " << pcl->points.at(i).y << " Z: " << pcl->points.at(i).z << std::endl;
+    // }
+
+    //Declare a vector that stores the {slope, yIntercept, inliers} for the best two lines
+    std::vector<std::vector<double>> bestFits { {0, 0, 0}, {0, 0, 0} };
+
     double yint {0};
     for(int i{0}; i < numLoops; i++) {
         int pt1Idx {std::rand() / ((RAND_MAX) / (pcl->width - 1))};
-        while(pcl->points.at(pt1Idx).z < 0.5) {
+        while(pcl->points.at(pt1Idx).z < 0.0) {
             pt1Idx = std::rand() / ((RAND_MAX) / (pcl->width - 1));
         }
         int pt2Idx {std::rand() / ((RAND_MAX) / (pcl->width - 1))};
-        while(pcl->points.at(pt2Idx).z < 0.5 || pt2Idx == pt1Idx) {
+        while(pcl->points.at(pt2Idx).z < 0.0 || pt2Idx == pt1Idx) {
             pt2Idx = std::rand() / ((RAND_MAX) / (pcl->width - 1));
         }
 
@@ -131,25 +141,44 @@ double ransac(const PointCloud::ConstPtr &pcl) {
             if(distance < inlierThreshold) inliers++;
         }
         
-        if(inliers > bestFit.at(1)) {
-            bestFit.at(0) = -(a / b);
-            bestFit.at(1) = inliers;
-            yint = c / b;
+        // In order to properly store the best two lines, each new line must check if it is better than the currently worst line.
+        size_t worstLineIdx {bestFits.at(0).at(2) > bestFits.at(1).at(2) ? 1 : 0};
+
+        // To represent the line,   {   slope,  yInt, inliers                     }
+        std::vector<double> newLine {(-(a/b)), (c/b), static_cast<double>(inliers)};
+
+        if(inliers > bestFits.at(worstLineIdx).at(2) && !close(bestFits.at(0), newLine) && !close(bestFits.at(1), newLine)) {
+            bestFits.at(worstLineIdx) = newLine;
         }
     }
 
     // For testing, print valid points to a csv file for graphing
 
-    // std::cout << "Final Slope: " << bestFit.at(0) << "Final Yint" << yint << std::endl;
-    // std::cout << "Inliers: " << bestFit.at(1) << std::endl;
-    // std::cout << "--------------" << std::endl;
-    // std::ofstream graphing("lineGraphing.csv");
-    // for(int i{0}; i < pcl->width; i++) {
-    //         graphing << pcl->points.at(i).x << "," << pcl->points.at(i).y << "," << pcl->points.at(i).z << "\n";
-    // }
-    // graphing.close();
+    std::cout << "Final Slope: " << bestFits.at(0).at(0) << "Final Yint" << bestFits.at(0).at(1) << std::endl;
+    std::cout << "Inliers: " << bestFits.at(0).at(2) << std::endl;
 
-    return bestFit.at(0);
+    std::cout << "Final Slope: " << bestFits.at(1).at(0) << "Final Yint" << bestFits.at(1).at(1) << std::endl;
+    std::cout << "Inliers: " << bestFits.at(1).at(2) << std::endl;
+    std::cout << "--------------" << std::endl;
+    std::ofstream graphing("lineGraphing.csv");
+    for(int i{0}; i < pcl->width; i++) {
+        graphing << pcl->points.at(i).x << "," << pcl->points.at(i).y << "," << pcl->points.at(i).z << "\n";
+    }
+    graphing.close();
+
+    return bestFits;
+}
+
+bool close(std::vector<double> line1, std::vector<double> line2) {
+    // std::cout << line1.at(0) << ", " << line1.at(1) << "; " << line2.at(0) << ", " << line2.at(1) << " : ";
+    // if(std::abs(line1.at(0) - line2.at(0)) < 0.2) {
+    //     std::cout << (std::abs(line1.at(1) - line2.at(1)) < 0.3) << std::endl;
+    // }
+    // else std::cout << false << std::endl;
+    if(std::abs(line1.at(0) - line2.at(0)) < 0.2) {
+        return (std::abs(line1.at(1) - line2.at(1)) < 0.3);
+    }
+    return false;
 }
 
 
@@ -160,6 +189,8 @@ int main(int argc, char **argv) {
         std::cout << "Expected 3 arguments: P, I, D" << std::endl;
         return 0;
     }
+
+    std::cout << std::boolalpha;
 
     ros::NodeHandle n;
 
