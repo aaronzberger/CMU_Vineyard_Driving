@@ -33,7 +33,7 @@ double lineToPtDistance(double x, double y, double a, double b, double c);
 
 
 double currentTime, yaw, x, y, lastMotionUpdate;
-ros::Publisher velPub;
+ros::Publisher velPub, markerPub;
 PID controller;
 
 /**
@@ -84,6 +84,78 @@ void velodyneCallBack(const PointCloud::ConstPtr &msg) {
 
         double bestLineSlope {lines.at(0).at(2) > lines.at(1).at(2) ? lines.at(0).at(0) : lines.at(1).at(0)};
 
+        // double distanceDiff {std::abs(lines.at(0).at(3) - lines.at(1).at(3))};
+        // std::cout << "Distance diff: " << distanceDiff << std::endl;
+
+        uint32_t shape = visualization_msgs::Marker::LINE_STRIP;
+
+        visualization_msgs::Marker marker1;
+        marker1.header.frame_id = "odom";
+        marker1.header.stamp = ros::Time::now();
+
+        marker1.ns = "shapes";
+        marker1.id = 0;
+        marker1.type = shape;
+        marker1.action = visualization_msgs::Marker::ADD;
+
+        geometry_msgs::Point pt1;
+        pt1.x = -100;
+        pt1.y = (lines.at(0).at(0) * pt1.x) + lines.at(0).at(1);
+        pt1.z = 0;
+
+        geometry_msgs::Point pt2;
+        pt2.x = 100;
+        pt2.y = (lines.at(0).at(0) * pt2.x) + lines.at(0).at(1);
+        pt2.z = 0;
+
+        marker1.points.push_back(pt1);
+        marker1.points.push_back(pt2);
+
+        marker1.scale.x = 0.2;
+   
+        // Set the color -- be sure to set alpha to something non-zero!
+        marker1.color.r = 0.0f;
+        marker1.color.g = 1.0f;
+        marker1.color.b = 0.0f;
+        marker1.color.a = 1.0;
+   
+        marker1.lifetime = ros::Duration();
+        markerPub.publish(marker1);
+
+
+        visualization_msgs::Marker marker2;
+        marker2.header.frame_id = "odom";
+        marker2.header.stamp = ros::Time::now();
+
+        marker2.ns = "shapes";
+        marker2.id = 1;
+        marker2.type = shape;
+        marker2.action = visualization_msgs::Marker::ADD;
+
+        geometry_msgs::Point pt3;
+        pt3.x = -100;
+        pt3.y = (lines.at(1).at(0) * pt3.x) + lines.at(1).at(1);
+        pt3.z = 0;
+
+        geometry_msgs::Point pt4;
+        pt4.x = 100;
+        pt4.y = (lines.at(1).at(0) * pt4.x) + lines.at(1).at(1);
+        pt4.z = 0;
+
+        marker2.points.push_back(pt3);
+        marker2.points.push_back(pt4);
+
+        marker2.scale.x = 0.2;
+   
+        // Set the color -- be sure to set alpha to something non-zero!
+        marker2.color.r = 0.0f;
+        marker2.color.g = 1.0f;
+        marker2.color.b = 0.0f;
+        marker2.color.a = 1.0;
+   
+        marker2.lifetime = ros::Duration();
+        markerPub.publish(marker2);
+
         double angle {std::atan(bestLineSlope)};
 
         //std::cout << "Theta: " << angle * (180 / 3.1415)  << std::endl;
@@ -94,13 +166,13 @@ void velodyneCallBack(const PointCloud::ConstPtr &msg) {
 
         geometry_msgs::Twist twist;
 
-        twist.linear.x = 0.4;
+        twist.linear.x = 0.0;
         twist.linear.y = 0;
         twist.linear.z = 0;
 
         twist.angular.x = 0;
         twist.angular.y = 0;
-        twist.angular.z = angVel;
+        twist.angular.z = 0.0;
 
         velPub.publish(twist);
         lastMotionUpdate = currentTime;
@@ -108,8 +180,8 @@ void velodyneCallBack(const PointCloud::ConstPtr &msg) {
 }
 
 std::vector<std::vector<double>> ransac(const PointCloud::ConstPtr &pcl) {
-    double inlierThreshold {0.1};
-    int numLoops {250};
+    double inlierThreshold {0.3};
+    int numLoops {500};
 
     // Print the entire Point Cloud
     // for(int i{0}; i < pcl->width; i++) {
@@ -118,9 +190,13 @@ std::vector<std::vector<double>> ransac(const PointCloud::ConstPtr &pcl) {
 
     //Declare a vector that stores the {slope, yIntercept, inliers} for the best two lines
     std::vector<std::vector<double>> bestFits { {0, 0, 0, 0}, {0, 0, 0, 0} };
+    // std::vector<std::vector<double>> inliers1;
+    // std::vector<std::vector<double>> inliers2;
 
     double yint {0};
     for(int i{0}; i < numLoops; i++) {
+        // std::vector<std::vector<double>> inlierVec;
+        //inlierVec.clear();
         int pt1Idx {std::rand() / ((RAND_MAX) / (pcl->width - 1))};
         while(isGroundPoint(pcl->points.at(pt1Idx))) {
             pt1Idx = std::rand() / ((RAND_MAX) / (pcl->width - 1));
@@ -141,8 +217,15 @@ std::vector<std::vector<double>> ransac(const PointCloud::ConstPtr &pcl) {
         // std::cout << "Slope: " << -(a / b) << ", Yint: " << c / b << std::endl;
 
         for(int j{0}; j < pcl->width; j++) {
-            double distance {lineToPtDistance(pcl->points.at(j).x, pcl->points.at(j).y, a, b, c)};
-            if(distance < inlierThreshold) inliers++;
+            if(!isGroundPoint(pcl->points.at(j))) {
+                double distance {lineToPtDistance(pcl->points.at(j).x, pcl->points.at(j).y, a, b, c)};
+                if(std::abs(distance) < inlierThreshold) {
+                    inliers++;
+                    // std::vector<double> instance {pcl->points.at(j).x, pcl->points.at(j).y, pcl->points.at(j).z};
+                    // inlierVec.push_back(instance);
+                    //std::cout << "Inlier: x: " << pcl->points.at(j).x << " y: " << pcl->points.at(j).y << " z: " << pcl->points.at(j).z << std::endl;
+                }
+            }
         }
 
         // std::cout << "Best lines: Slope1: " << bestFits.at(0).at(0) << " Yint1: " << bestFits.at(0).at(1) << " Slope2: " << bestFits.at(1).at(0) << " Yint2: " << bestFits.at(1).at(1) << std::endl;
@@ -153,33 +236,45 @@ std::vector<std::vector<double>> ransac(const PointCloud::ConstPtr &pcl) {
 
         if(close(bestFits.at(0), newLine) && inliers > bestFits.at(0).at(2)) {
             bestFits.at(0) = newLine;
+            // inliers1 = inlierVec;
         } else if(close(bestFits.at(1), newLine) && inliers > bestFits.at(1).at(2)) {
             bestFits.at(1) = newLine;
+            // inliers2 = inlierVec;
         } else {
             size_t worstLineIdx {bestFits.at(0).at(2) > bestFits.at(1).at(2) ? 1 : 0};
             if(inliers > bestFits.at(worstLineIdx).at(2) && !close(bestFits.at(1 - worstLineIdx), newLine)) {
                 bestFits.at(worstLineIdx) = newLine;
+                // if(worstLineIdx == 0) inliers1 = inlierVec;
+                // else inliers2 = inlierVec;
             }
         }
 
-        if(close(bestFits.at(0), newLine)) {
-            if(inliers > bestFits.at(0).at(2)) {
-                bestFits.at(0) = newLine;
-            }
-        }
+        // if(close(bestFits.at(0), newLine)) {
+        //     if(inliers > bestFits.at(0).at(2)) {
+        //         bestFits.at(0) = newLine;
+        //     }
+        // }
     }
 
     // For testing, print valid points to a csv file for graphing
-
+    std::cout << "--------------" << std::endl;
     std::cout << "Final Slope: " << bestFits.at(0).at(0) << " Final Yint" << bestFits.at(0).at(1) << std::endl;
     std::cout << "Inliers: " << bestFits.at(0).at(2) << " Distance: " << bestFits.at(0).at(3) << std::endl;
+    // for(auto vec: inliers1) {
+    //     std::cout << "Inlier: x: " << vec.at(0) << " y: " << vec.at(1) << " z: " << vec.at(2) << std::endl;
+    // }
 
     std::cout << "Final Slope: " << bestFits.at(1).at(0) << " Final Yint" << bestFits.at(1).at(1) << std::endl;
     std::cout << "Inliers: " << bestFits.at(1).at(2) << " Distance: " << bestFits.at(1).at(3) << std::endl;
+    // for(auto vec: inliers2) {
+    //     std::cout << "Inlier: x: " << vec.at(0) << " y: " << vec.at(1) << " z: " << vec.at(2) << std::endl;
+    // }
     std::cout << "--------------" << std::endl;
     std::ofstream graphing("lineGraphing.csv");
     for(int i{0}; i < pcl->width; i++) {
-        graphing << pcl->points.at(i).x << "," << pcl->points.at(i).y << "," << pcl->points.at(i).z << "\n";
+        if(!isGroundPoint(pcl->points.at(i))) {
+            graphing << pcl->points.at(i).x << "," << pcl->points.at(i).y << "," << pcl->points.at(i).z << "\n";
+        }
     }
     graphing.close();
 
@@ -199,7 +294,7 @@ bool close(std::vector<double> line1, std::vector<double> line2) {
 }
 
 double lineToPtDistance(double x, double y, double a, double b, double c) {
-    return (std::abs((a * x) + (b * y) - c)) / (std::sqrt(a*a + b*b));
+    return (((a * x) + (b * y) - c) / (std::sqrt(a*a + b*b)));
 }
 
 
@@ -221,6 +316,7 @@ int main(int argc, char **argv) {
     ros::Subscriber subClock = n.subscribe<rosgraph_msgs::Clock>("/clock", 1000, clockCallback);
     ros::Subscriber subVelodyne = n.subscribe<PointCloud>("/velodyne_points", 1000, velodyneCallBack);
     velPub = n.advertise<geometry_msgs::Twist>("/cmd_vel", 1);
+    markerPub = n.advertise<visualization_msgs::Marker>("/visualization_marker", 1);
 
     controller = PID(std::atof(argv[1]), std::atof(argv[2]), std::atof(argv[3]));
 
