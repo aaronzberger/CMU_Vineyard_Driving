@@ -36,6 +36,12 @@ double currentTime, yaw, x, y, lastMotionUpdate;
 ros::Publisher velPub, markerPub;
 PID controller;
 
+std::vector<std::vector<double>> tMinus2Lines;
+std::vector<std::vector<double>> tMinus1Lines;
+std::vector<std::vector<double>> tZeroLines;
+std::vector<std::vector<double>> tPlus1Lines;
+std::vector<std::vector<double>> tPlus2Lines;
+
 /**
  * @brief Updates the current time variable
  * 
@@ -73,6 +79,13 @@ void odomCallback(const nav_msgs::Odometry::ConstPtr &msg) {
     yaw = tf::getYaw(quat);
 }
 
+void moveLineVecsBack() {
+    tMinus2Lines = tMinus1Lines;
+    tMinus1Lines = tZeroLines;
+    tZeroLines = tPlus1Lines;
+    tPlus1Lines = tPlus2Lines;
+}
+
 /**
  * @brief Update the output to the robot using Lidar data, through a PID controller
  * 
@@ -82,100 +95,115 @@ void velodyneCallBack(const PointCloud::ConstPtr &msg) {
     if(currentTime - lastMotionUpdate > 10) {
         std::vector<std::vector<double>> lines {ransac(msg)};
 
-        double bestLineSlope {lines.at(0).at(2) > lines.at(1).at(2) ? lines.at(0).at(0) : lines.at(1).at(0)};
+        moveLineVecsBack();
+        tPlus2Lines = lines;
 
-        // double distanceDiff {std::abs(lines.at(0).at(3) - lines.at(1).at(3))};
-        // std::cout << "Distance diff: " << distanceDiff << std::endl;
+        if(!tMinus2Lines.empty()) {
 
-        uint32_t shape = visualization_msgs::Marker::LINE_STRIP;
+            double bestLineSlope {lines.at(0).at(2) > lines.at(1).at(2) ? lines.at(0).at(0) : lines.at(1).at(0)};
 
-        visualization_msgs::Marker marker1;
-        marker1.header.frame_id = "odom";
-        marker1.header.stamp = ros::Time::now();
+            double leftLineSlope {(tMinus2Lines.at(0).at(0) + tMinus1Lines.at(0).at(0) + tZeroLines.at(0).at(0) + tPlus1Lines.at(0).at(0) + tPlus2Lines.at(0).at(0)) / 5.0};
+            double leftLineYint {(tMinus2Lines.at(0).at(1) + tMinus1Lines.at(0).at(1) + tZeroLines.at(0).at(1) + tPlus1Lines.at(0).at(1) + tPlus2Lines.at(0).at(1)) / 5.0};
+            double rightLineSlope {(tMinus2Lines.at(1).at(0) + tMinus1Lines.at(1).at(0) + tZeroLines.at(1).at(0) + tPlus1Lines.at(1).at(0) + tPlus2Lines.at(1).at(0)) / 5.0};
+            double rightLineYint {(tMinus2Lines.at(1).at(1) + tMinus1Lines.at(1).at(1) + tZeroLines.at(1).at(1) + tPlus1Lines.at(1).at(1) + tPlus2Lines.at(1).at(1)) / 5.0};
 
-        marker1.ns = "shapes";
-        marker1.id = 0;
-        marker1.type = shape;
-        marker1.action = visualization_msgs::Marker::ADD;
+            // double distanceDiff {std::abs(lines.at(0).at(3) - lines.at(1).at(3))};
+            // std::cout << "Distance diff: " << distanceDiff << std::endl;
 
-        geometry_msgs::Point pt1;
-        pt1.x = -100;
-        pt1.y = (lines.at(0).at(0) * pt1.x) + lines.at(0).at(1);
-        pt1.z = 0;
+            uint32_t shape = visualization_msgs::Marker::LINE_STRIP;
 
-        geometry_msgs::Point pt2;
-        pt2.x = 100;
-        pt2.y = (lines.at(0).at(0) * pt2.x) + lines.at(0).at(1);
-        pt2.z = 0;
+            visualization_msgs::Marker marker1;
+            marker1.header.frame_id = "odom";
+            marker1.header.stamp = ros::Time::now();
 
-        marker1.points.push_back(pt1);
-        marker1.points.push_back(pt2);
+            marker1.ns = "shapes";
+            marker1.id = 0;
+            marker1.type = shape;
+            marker1.action = visualization_msgs::Marker::ADD;
 
-        marker1.scale.x = 0.2;
-   
-        // Set the color -- be sure to set alpha to something non-zero!
-        marker1.color.r = 0.0f;
-        marker1.color.g = 1.0f;
-        marker1.color.b = 0.0f;
-        marker1.color.a = 1.0;
-   
-        marker1.lifetime = ros::Duration();
-        markerPub.publish(marker1);
+            geometry_msgs::Point pt1;
+            pt1.x = -100;
+            // pt1.y = (lines.at(0).at(0) * pt1.x) + lines.at(0).at(1);
+            pt1.y = (leftLineSlope * pt1.x) + leftLineYint;
+            pt1.z = 0;
+
+            geometry_msgs::Point pt2;
+            pt2.x = 100;
+            // pt2.y = (lines.at(0).at(0) * pt2.x) + lines.at(0).at(1);
+            pt2.y = (leftLineSlope * pt2.x) + leftLineYint;
+            pt2.z = 0;
+
+            marker1.points.push_back(pt1);
+            marker1.points.push_back(pt2);
+
+            marker1.scale.x = 0.15;
+    
+            // Set the color -- be sure to set alpha to something non-zero!
+            marker1.color.r = 0.0f;
+            marker1.color.g = 1.0f;
+            marker1.color.b = 0.0f;
+            marker1.color.a = 1.0;
+    
+            marker1.lifetime = ros::Duration();
+            markerPub.publish(marker1);
 
 
-        visualization_msgs::Marker marker2;
-        marker2.header.frame_id = "odom";
-        marker2.header.stamp = ros::Time::now();
+            visualization_msgs::Marker marker2;
+            marker2.header.frame_id = "odom";
+            marker2.header.stamp = ros::Time::now();
 
-        marker2.ns = "shapes";
-        marker2.id = 1;
-        marker2.type = shape;
-        marker2.action = visualization_msgs::Marker::ADD;
+            marker2.ns = "shapes";
+            marker2.id = 1;
+            marker2.type = shape;
+            marker2.action = visualization_msgs::Marker::ADD;
 
-        geometry_msgs::Point pt3;
-        pt3.x = -100;
-        pt3.y = (lines.at(1).at(0) * pt3.x) + lines.at(1).at(1);
-        pt3.z = 0;
+            geometry_msgs::Point pt3;
+            pt3.x = -100;
+            // pt3.y = (lines.at(1).at(0) * pt3.x) + lines.at(1).at(1);
+            pt3.y = (rightLineSlope * pt3.x) + rightLineYint;
+            pt3.z = 0;
 
-        geometry_msgs::Point pt4;
-        pt4.x = 100;
-        pt4.y = (lines.at(1).at(0) * pt4.x) + lines.at(1).at(1);
-        pt4.z = 0;
+            geometry_msgs::Point pt4;
+            pt4.x = 100;
+            // pt4.y = (lines.at(1).at(0) * pt4.x) + lines.at(1).at(1);
+            pt4.y = (rightLineSlope * pt4.x) + rightLineYint;
+            pt4.z = 0;
 
-        marker2.points.push_back(pt3);
-        marker2.points.push_back(pt4);
+            marker2.points.push_back(pt3);
+            marker2.points.push_back(pt4);
 
-        marker2.scale.x = 0.2;
-   
-        // Set the color -- be sure to set alpha to something non-zero!
-        marker2.color.r = 0.0f;
-        marker2.color.g = 1.0f;
-        marker2.color.b = 0.0f;
-        marker2.color.a = 1.0;
-   
-        marker2.lifetime = ros::Duration();
-        markerPub.publish(marker2);
+            marker2.scale.x = 0.15;
+    
+            // Set the color -- be sure to set alpha to something non-zero!
+            marker2.color.r = 1.0f;
+            marker2.color.g = 0.0f;
+            marker2.color.b = 0.0f;
+            marker2.color.a = 1.0;
+    
+            marker2.lifetime = ros::Duration();
+            markerPub.publish(marker2);
 
-        double angle {std::atan(bestLineSlope)};
+            double angle {std::atan(bestLineSlope)};
 
-        //std::cout << "Theta: " << angle * (180 / 3.1415)  << std::endl;
+            //std::cout << "Theta: " << angle * (180 / 3.1415)  << std::endl;
 
-        double angVel {controller.calculate(angle, currentTime)};
+            double angVel {controller.calculate(angle, currentTime)};
 
-        //std::cout << "PID Output: " << angVel << std::endl;
+            //std::cout << "PID Output: " << angVel << std::endl;
 
-        geometry_msgs::Twist twist;
+            geometry_msgs::Twist twist;
 
-        twist.linear.x = 0.0;
-        twist.linear.y = 0;
-        twist.linear.z = 0;
+            twist.linear.x = 0.0;
+            twist.linear.y = 0;
+            twist.linear.z = 0;
 
-        twist.angular.x = 0;
-        twist.angular.y = 0;
-        twist.angular.z = 0.0;
+            twist.angular.x = 0;
+            twist.angular.y = 0;
+            twist.angular.z = 0.0;
 
-        velPub.publish(twist);
-        lastMotionUpdate = currentTime;
+            velPub.publish(twist);
+            lastMotionUpdate = currentTime;
+        }
     }
 }
 
@@ -234,18 +262,29 @@ std::vector<std::vector<double>> ransac(const PointCloud::ConstPtr &pcl) {
         double distanceToLine {lineToPtDistance(x, y, a, b, c)};
         std::vector<double> newLine {(-(a/b)), (c/b), static_cast<double>(inliers), distanceToLine};
 
-        if(close(bestFits.at(0), newLine) && inliers > bestFits.at(0).at(2)) {
-            bestFits.at(0) = newLine;
-            // inliers1 = inlierVec;
-        } else if(close(bestFits.at(1), newLine) && inliers > bestFits.at(1).at(2)) {
-            bestFits.at(1) = newLine;
-            // inliers2 = inlierVec;
-        } else {
-            size_t worstLineIdx {bestFits.at(0).at(2) > bestFits.at(1).at(2) ? 1 : 0};
-            if(inliers > bestFits.at(worstLineIdx).at(2) && !close(bestFits.at(1 - worstLineIdx), newLine)) {
-                bestFits.at(worstLineIdx) = newLine;
-                // if(worstLineIdx == 0) inliers1 = inlierVec;
-                // else inliers2 = inlierVec;
+        // if(close(bestFits.at(0), newLine) && inliers > bestFits.at(0).at(2)) {
+        //     bestFits.at(0) = newLine;
+        //     // inliers1 = inlierVec;
+        // } else if(close(bestFits.at(1), newLine) && inliers > bestFits.at(1).at(2)) {
+        //     bestFits.at(1) = newLine;
+        //     // inliers2 = inlierVec;
+        // } else {
+        //     size_t worstLineIdx {bestFits.at(0).at(2) > bestFits.at(1).at(2) ? 1 : 0};
+        //     if(inliers > bestFits.at(worstLineIdx).at(2) && !close(bestFits.at(1 - worstLineIdx), newLine)) {
+        //         bestFits.at(worstLineIdx) = newLine;
+        //         // if(worstLineIdx == 0) inliers1 = inlierVec;
+        //         // else inliers2 = inlierVec;
+        //     }
+        // }
+
+        if(newLine.at(1) < 0) {
+            if(inliers > bestFits.at(0).at(2)) {
+                bestFits.at(0) = newLine;
+            }
+        }
+        else {
+            if(inliers > bestFits.at(1).at(2)) {
+                bestFits.at(1) = newLine;
             }
         }
 
