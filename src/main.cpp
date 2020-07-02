@@ -22,21 +22,31 @@
 
 typedef pcl::PointCloud<pcl::PointXYZ> PointCloud;
 
+struct line {
+    double a, b, c, distance;
+    unsigned inliers;
+};
+
+struct lineGroup {
+    std::vector<line> lines;
+    int totalInliers;
+};
+
 //Function Prototypes
 void clockCallback(const rosgraph_msgs::Clock::ConstPtr &msg);
 bool isGroundPoint(const pcl::PointXYZ &pt);
 void odomCallback(const nav_msgs::Odometry::ConstPtr &msg);
 void velodyneCallBack(const PointCloud::ConstPtr &msg);
-std::vector<std::vector<double>> ransac(const PointCloud::ConstPtr &pcl);
+lineGroup ransac(const PointCloud::ConstPtr &pcl);
 bool close(std::vector<double> line1, std::vector<double> line2);
 double lineToPtDistance(double x, double y, double a, double b, double c);
 void moveLineVecsBack();
-void moveValidPtVecBack();
+void moveVinePtsVecBack();
 
 double currentTime, yaw, x, y, lastMotionUpdate;
 ros::Publisher velPub, markerPub;
 PID controller;
-int counter;
+int counter, markerID;
 
 //Storing the past lines for a moving average
 std::vector<std::vector<double>> tMinus2Lines;
@@ -46,9 +56,9 @@ std::vector<std::vector<double>> tPlus1Lines;
 std::vector<std::vector<double>> tPlus2Lines;
 
 //Storing the past number of valid points for a moving average
-std::vector<int> validPtVec(49, -1);
+std::vector<int> numVinePtsVec(49, -1);
 
-std::ofstream validPtsGraph("validPts.csv");
+std::ofstream vinePtsCounterFile("vinePointsCounter.csv");
 
 /**
  * @brief Updates the current time variable
@@ -100,11 +110,50 @@ void moveLineVecsBack() {
 /**
  * @brief Move back the past valid points to make room for a new value every frame
  */
-void moveValidPtVecBack() {
-    int numPts = validPtVec.size();
+void moveVinePtsVecBack() {
+    int numPts = numVinePtsVec.size();
     for(int i{1}; i < numPts; i++) {
-        validPtVec.at(i - 1) = validPtVec.at(i);
+        numVinePtsVec.at(i - 1) = numVinePtsVec.at(i);
     }
+}
+
+void displayLine(line line, float r, float g, float b) {
+    uint32_t shape = visualization_msgs::Marker::LINE_STRIP;
+
+    visualization_msgs::Marker marker;
+    marker.header.frame_id = "odom";
+    marker.header.stamp = ros::Time::now();
+
+    marker.ns = "shapes";
+    marker.id = markerID;
+    marker.type = shape;
+    marker.action = visualization_msgs::Marker::ADD;
+
+    geometry_msgs::Point pt1;
+    pt1.x = -100;
+    // pt1.y = (lines.at(0).at(0) * pt1.x) + lines.at(0).at(1);
+    pt1.y = ((-(line.a / line.b)) * pt1.x) + (line.c / line.b);
+    pt1.z = 0;
+
+    geometry_msgs::Point pt2;
+    pt2.x = 100;
+    // pt2.y = (lines.at(0).at(0) * pt2.x) + lines.at(0).at(1);
+    pt2.y = ((-(line.a / line.b)) * pt2.x) + (line.c / line.b);
+    pt2.z = 0;
+
+    marker.points.push_back(pt1);
+    marker.points.push_back(pt2);
+
+    marker.scale.x = 0.15;
+
+    // Set the color -- be sure to set alpha to something non-zero!
+    marker.color.r = r;
+    marker.color.g = g;
+    marker.color.b = b;
+    marker.color.a = 1.0;
+
+    marker.lifetime = ros::Duration();
+    markerPub.publish(marker);
 }
 
 /**
@@ -114,8 +163,33 @@ void moveValidPtVecBack() {
  */
 void velodyneCallBack(const PointCloud::ConstPtr &msg) {
     if(currentTime - lastMotionUpdate > 10) {
-        //Collect the detected lines from the RANSAC algorithm
-        std::vector<std::vector<double>> lines {ransac(msg)};
+        // Collect the detected lines from the RANSAC algorithm
+        lineGroup lines {ransac(msg)};
+
+        // For testing, write a file with the contents of all the valid points in the most recent point cloud
+        int numVinePts {0};
+        std::ofstream vinePointsFile("vinePoints.csv");
+        for(int i{0}; i < msg->width; i++) {
+            if(!isGroundPoint(pcl->points.at(i))) {
+                vinePointsFile << msg->points.at(i).x << "," << msg->points.at(i).y << "," << msg->points.at(i).z << "\n";
+                numVinePts++;
+            }
+        }
+        vinePointsFile.close();
+        vinePtsCounterFile << counter << "," << numVinePts;
+
+        // // Detect the probable end of a row by keeping track of the number of vine points found
+        // moveVinePtsVecBack();
+        // numVinePtsVec.at(numVinePtsVec.size() - 1) = numVinePts;
+
+        // if(!(numVinePtsVec.at(0) == -1)) {
+        //     double movingAverage {0};
+        //     for(auto val : numVinePtsVec) movingAverage += val;
+        //     movingAverage /= numVinePtsVec.size();
+        //     vinePtsCounterFile << "," << movingAverage;
+        // }
+        // counter++;
+        // vinePtsCounterFile << "\n";
 
         //Store the last 5 entries for a moving average smoothing filter
         moveLineVecsBack();
@@ -227,20 +301,17 @@ void velodyneCallBack(const PointCloud::ConstPtr &msg) {
     }
 }
 
-std::vector<std::vector<double>> ransac(const PointCloud::ConstPtr &pcl) {
+lineGroup ransac(const PointCloud::ConstPtr &pcl) {
     double inlierThreshold {0.3};
     int numLoops {500};
+    int minInlierThreshold {20};
+    double distanceBetweenLines {3.5};
 
-    // Print the entire Point Cloud
-    // for(int i{0}; i < pcl->width; i++) {
-    //     std::cout << "X: " << pcl->points.at(i).x << " Y: " << pcl->points.at(i).y << " Z: " << pcl->points.at(i).z << std::endl;
-    // }
+    lineGroup bestLineGroup;
+    bestLineGroup.totalInliers = 0;
 
-    //Declare a vector that stores the {slope, yIntercept, inliers} for the best two lines
-    std::vector<std::vector<double>> bestFits { {0, 0, 0, 0}, {0, 0, 0, 0} };
-
-    double yint {0};
     for(int i{0}; i < numLoops; i++) {
+        // Find two random points for RANSAC line detection
         int pt1Idx {std::rand() / ((RAND_MAX) / (pcl->width - 1))};
         while(isGroundPoint(pcl->points.at(pt1Idx))) {
             pt1Idx = std::rand() / ((RAND_MAX) / (pcl->width - 1));
@@ -250,81 +321,58 @@ std::vector<std::vector<double>> ransac(const PointCloud::ConstPtr &pcl) {
             pt2Idx = std::rand() / ((RAND_MAX) / (pcl->width - 1));
         }
 
+        // Construct a line from those two random points
         double a {pcl->points.at(pt2Idx).y - pcl->points.at(pt1Idx).y};
         double b {pcl->points.at(pt1Idx).x - pcl->points.at(pt2Idx).x};
         double c {(a * pcl->points.at(pt1Idx).x) + (b * pcl->points.at(pt1Idx).y)};
+
+        // Calculate how many inliers that line has
+        // for(int j{0}; j < pcl->width; j++) {
+        //     if(!isGroundPoint(pcl->points.at(j))) {
+        //         double distance {lineToPtDistance(pcl->points.at(j).x, pcl->points.at(j).y, a, b, c)};
+        //         if(std::abs(distance) < inlierThreshold) {
+        //             inliers++;
+        //         }
+        //     }
+        // }
+
+        // Determine the number of inliers in the originally detected line
         int inliers {0};
-
-        // std::cout << "X1: " << pcl->points.at(pt1Idx).x << "Y1: " << pcl->points.at(pt1Idx).y <<
-        //              "X2: " << pcl->points.at(pt2Idx).x << "Y2: " << pcl->points.at(pt2Idx).y << std::endl;
-        // std::cout << "A: " << a << ", B: " << b << ", C: " << c << std::endl;
-        // std::cout << "Slope: " << -(a / b) << ", Yint: " << c / b << std::endl;
-
-        for(int j{0}; j < pcl->width; j++) {
+        for(int j{0}; i < pcl->width; j++) {
             if(!isGroundPoint(pcl->points.at(j))) {
                 double distance {lineToPtDistance(pcl->points.at(j).x, pcl->points.at(j).y, a, b, c)};
-                if(std::abs(distance) < inlierThreshold) {
-                    inliers++;
+                if(std::abs(distance) < inlierThreshold) inliers++;
+            }
+        }
+
+        // If the original line is strong enough, look around for other parallel vine rows
+        if(inliers > minInlierThreshold) {
+            lineGroup lineGroup;
+            lineGroup.totalInliers = 0;
+
+            int lookaroundRadius{2};
+
+            for(int i{-lookaroundRadius}; i <= lookaroundRadius; i++) {
+                line line;
+                line.a = a;
+                line.b = b;
+                line.c = c + (i * distanceBetweenLines);
+                line.distance = lineToPtDistance(x, y, line.a, line.b, line.c);
+                line.inliers = 0;
+                for(int j{0}; i < pcl->width; j++) {
+                    if(!isGroundPoint(pcl->points.at(j))) {
+                        double distance {lineToPtDistance(pcl->points.at(j).x, pcl->points.at(j).y, line.a, line.b, line.c)};
+                        if(std::abs(distance) < inlierThreshold) line.inliers++;
+                    }
                 }
+                lineGroup.totalInliers += line.inliers;
+                lineGroup.lines.push_back(line);
             }
         }
 
-        // std::cout << "Best lines: Slope1: " << bestFits.at(0).at(0) << " Yint1: " << bestFits.at(0).at(1) << " Slope2: " << bestFits.at(1).at(0) << " Yint2: " << bestFits.at(1).at(1) << std::endl;
-        
-        // To represent the line, {slope, yInt, inliers, distance to line}
-        double distanceToLine {lineToPtDistance(x, y, a, b, c)};
-        std::vector<double> newLine {(-(a/b)), (c/b), static_cast<double>(inliers), distanceToLine};
-
-        if(newLine.at(1) < 0) {
-            if(inliers > bestFits.at(0).at(2)) {
-                bestFits.at(0) = newLine;
-            }
-        }
-        else {
-            if(inliers > bestFits.at(1).at(2)) {
-                bestFits.at(1) = newLine;
-            }
-        }
+        if(lineGroup.totalInliers > bestLineGroup.totalInliers) bestLineGroup = lineGroup;
     }
-
-    // For testing, print valid points to a csv file for graphing
-    // std::cout << "--------------" << std::endl;
-    // std::cout << "Final Slope: " << bestFits.at(0).at(0) << " Final Yint" << bestFits.at(0).at(1) << std::endl;
-    // std::cout << "Inliers: " << bestFits.at(0).at(2) << " Distance: " << bestFits.at(0).at(3) << std::endl;
-    // for(auto vec: inliers1) {
-    //     std::cout << "Inlier: x: " << vec.at(0) << " y: " << vec.at(1) << " z: " << vec.at(2) << std::endl;
-    // }
-
-    // std::cout << "Final Slope: " << bestFits.at(1).at(0) << " Final Yint" << bestFits.at(1).at(1) << std::endl;
-    // std::cout << "Inliers: " << bestFits.at(1).at(2) << " Distance: " << bestFits.at(1).at(3) << std::endl;
-    // for(auto vec: inliers2) {
-    //     std::cout << "Inlier: x: " << vec.at(0) << " y: " << vec.at(1) << " z: " << vec.at(2) << std::endl;
-    // }
-    int validPts {0};
-    std::ofstream graphing("lineGraphing.csv");
-    for(int i{0}; i < pcl->width; i++) {
-        if(!isGroundPoint(pcl->points.at(i))) {
-            graphing << pcl->points.at(i).x << "," << pcl->points.at(i).y << "," << pcl->points.at(i).z << "\n";
-            validPts++;
-        }
-    }
-    graphing.close();
-    std::cout << "Valid Pts: " << validPts << std::endl;
-    validPtsGraph << counter << "," << validPts;
-    // std::cout << "--------------" << std::endl;
-
-    moveValidPtVecBack();
-    validPtVec.at(validPtVec.size() - 1) = validPts;
-
-    if(!(validPtVec.at(0) == -1)) {
-        double mean {0};
-        for(auto val : validPtVec) mean += val;
-        mean /= validPtVec.size();
-        validPtsGraph << "," << mean;
-    }
-    counter++;
-    validPtsGraph << "\n";
-    return bestFits;
+    return bestLineGroup;
 }
 
 /**
@@ -357,6 +405,18 @@ double lineToPtDistance(double x, double y, double a, double b, double c) {
     return (((a * x) + (b * y) - c) / (std::sqrt(a*a + b*b)));
 }
 
+/**
+ * @brief Print the contents of a point cloud for testing
+ * 
+ * @param pcl the point cloud to print
+ */
+void printPointCloud(const PointCloud::ConstPtr &pcl) {
+    for(int i{0}; i < pcl->width; i++) {
+        if(!isGroundPoint(pcl->points.at(i))) {
+            std::cout << "X: " << pcl->points.at(i).x << " Y: " << pcl->points.at(i).y << " Z: " << pcl->points.at(i).z << std::endl;
+        }
+    }
+}
 
 int main(int argc, char **argv) {
     ros::init(argc, argv, "wall_controller");
@@ -367,6 +427,7 @@ int main(int argc, char **argv) {
     }
 
     counter = 0;
+    markerID = 0;
 
     std::cout << std::boolalpha;
 
@@ -389,7 +450,7 @@ int main(int argc, char **argv) {
 
     ros::spin();
 
-    validPtsGraph.close();
+    vinePtsCounterFile.close();
 
     return 0;
 }
