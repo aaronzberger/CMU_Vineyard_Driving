@@ -20,9 +20,9 @@
 #include <png++/png.hpp>
 
 
-
 typedef pcl::PointCloud<pcl::PointXYZ> PointCloud;
 
+//Function Prototypes
 void clockCallback(const rosgraph_msgs::Clock::ConstPtr &msg);
 bool isGroundPoint(const pcl::PointXYZ &pt);
 void odomCallback(const nav_msgs::Odometry::ConstPtr &msg);
@@ -30,17 +30,25 @@ void velodyneCallBack(const PointCloud::ConstPtr &msg);
 std::vector<std::vector<double>> ransac(const PointCloud::ConstPtr &pcl);
 bool close(std::vector<double> line1, std::vector<double> line2);
 double lineToPtDistance(double x, double y, double a, double b, double c);
-
+void moveLineVecsBack();
+void moveValidPtVecBack();
 
 double currentTime, yaw, x, y, lastMotionUpdate;
 ros::Publisher velPub, markerPub;
 PID controller;
+int counter;
 
+//Storing the past lines for a moving average
 std::vector<std::vector<double>> tMinus2Lines;
 std::vector<std::vector<double>> tMinus1Lines;
 std::vector<std::vector<double>> tZeroLines;
 std::vector<std::vector<double>> tPlus1Lines;
 std::vector<std::vector<double>> tPlus2Lines;
+
+//Storing the past number of valid points for a moving average
+std::vector<int> validPtVec(49, -1);
+
+std::ofstream validPtsGraph("validPts.csv");
 
 /**
  * @brief Updates the current time variable
@@ -79,11 +87,24 @@ void odomCallback(const nav_msgs::Odometry::ConstPtr &msg) {
     yaw = tf::getYaw(quat);
 }
 
+/**
+ * @brief Move back the past lines to make room for a new one every frame
+ */
 void moveLineVecsBack() {
     tMinus2Lines = tMinus1Lines;
     tMinus1Lines = tZeroLines;
     tZeroLines = tPlus1Lines;
     tPlus1Lines = tPlus2Lines;
+}
+
+/**
+ * @brief Move back the past valid points to make room for a new value every frame
+ */
+void moveValidPtVecBack() {
+    int numPts = validPtVec.size();
+    for(int i{1}; i < numPts; i++) {
+        validPtVec.at(i - 1) = validPtVec.at(i);
+    }
 }
 
 /**
@@ -93,23 +114,22 @@ void moveLineVecsBack() {
  */
 void velodyneCallBack(const PointCloud::ConstPtr &msg) {
     if(currentTime - lastMotionUpdate > 10) {
+        //Collect the detected lines from the RANSAC algorithm
         std::vector<std::vector<double>> lines {ransac(msg)};
 
+        //Store the last 5 entries for a moving average smoothing filter
         moveLineVecsBack();
         tPlus2Lines = lines;
 
         if(!tMinus2Lines.empty()) {
-
-            double bestLineSlope {lines.at(0).at(2) > lines.at(1).at(2) ? lines.at(0).at(0) : lines.at(1).at(0)};
-
+            //Calculate the average of the last 5 lines
             double leftLineSlope {(tMinus2Lines.at(0).at(0) + tMinus1Lines.at(0).at(0) + tZeroLines.at(0).at(0) + tPlus1Lines.at(0).at(0) + tPlus2Lines.at(0).at(0)) / 5.0};
             double leftLineYint {(tMinus2Lines.at(0).at(1) + tMinus1Lines.at(0).at(1) + tZeroLines.at(0).at(1) + tPlus1Lines.at(0).at(1) + tPlus2Lines.at(0).at(1)) / 5.0};
             double rightLineSlope {(tMinus2Lines.at(1).at(0) + tMinus1Lines.at(1).at(0) + tZeroLines.at(1).at(0) + tPlus1Lines.at(1).at(0) + tPlus2Lines.at(1).at(0)) / 5.0};
             double rightLineYint {(tMinus2Lines.at(1).at(1) + tMinus1Lines.at(1).at(1) + tZeroLines.at(1).at(1) + tPlus1Lines.at(1).at(1) + tPlus2Lines.at(1).at(1)) / 5.0};
 
-            // double distanceDiff {std::abs(lines.at(0).at(3) - lines.at(1).at(3))};
-            // std::cout << "Distance diff: " << distanceDiff << std::endl;
-
+            //DISPLAY DETECTED LINES IN RVIZ
+            //******************************************************//
             uint32_t shape = visualization_msgs::Marker::LINE_STRIP;
 
             visualization_msgs::Marker marker1;
@@ -182,18 +202,18 @@ void velodyneCallBack(const PointCloud::ConstPtr &msg) {
     
             marker2.lifetime = ros::Duration();
             markerPub.publish(marker2);
+            //******************************************************//
+        
+            //Calculate the input for the PID controller
+            double angle {std::atan(rightLineSlope)};
 
-            double angle {std::atan(bestLineSlope)};
-
-            //std::cout << "Theta: " << angle * (180 / 3.1415)  << std::endl;
-
+            //Run the PID controller
             double angVel {controller.calculate(angle, currentTime)};
 
-            //std::cout << "PID Output: " << angVel << std::endl;
-
+            //Construct a velocity message to give to the Husky
             geometry_msgs::Twist twist;
 
-            twist.linear.x = 0.0;
+            twist.linear.x = 0.3;
             twist.linear.y = 0;
             twist.linear.z = 0;
 
@@ -218,13 +238,9 @@ std::vector<std::vector<double>> ransac(const PointCloud::ConstPtr &pcl) {
 
     //Declare a vector that stores the {slope, yIntercept, inliers} for the best two lines
     std::vector<std::vector<double>> bestFits { {0, 0, 0, 0}, {0, 0, 0, 0} };
-    // std::vector<std::vector<double>> inliers1;
-    // std::vector<std::vector<double>> inliers2;
 
     double yint {0};
     for(int i{0}; i < numLoops; i++) {
-        // std::vector<std::vector<double>> inlierVec;
-        //inlierVec.clear();
         int pt1Idx {std::rand() / ((RAND_MAX) / (pcl->width - 1))};
         while(isGroundPoint(pcl->points.at(pt1Idx))) {
             pt1Idx = std::rand() / ((RAND_MAX) / (pcl->width - 1));
@@ -249,9 +265,6 @@ std::vector<std::vector<double>> ransac(const PointCloud::ConstPtr &pcl) {
                 double distance {lineToPtDistance(pcl->points.at(j).x, pcl->points.at(j).y, a, b, c)};
                 if(std::abs(distance) < inlierThreshold) {
                     inliers++;
-                    // std::vector<double> instance {pcl->points.at(j).x, pcl->points.at(j).y, pcl->points.at(j).z};
-                    // inlierVec.push_back(instance);
-                    //std::cout << "Inlier: x: " << pcl->points.at(j).x << " y: " << pcl->points.at(j).y << " z: " << pcl->points.at(j).z << std::endl;
                 }
             }
         }
@@ -261,21 +274,6 @@ std::vector<std::vector<double>> ransac(const PointCloud::ConstPtr &pcl) {
         // To represent the line, {slope, yInt, inliers, distance to line}
         double distanceToLine {lineToPtDistance(x, y, a, b, c)};
         std::vector<double> newLine {(-(a/b)), (c/b), static_cast<double>(inliers), distanceToLine};
-
-        // if(close(bestFits.at(0), newLine) && inliers > bestFits.at(0).at(2)) {
-        //     bestFits.at(0) = newLine;
-        //     // inliers1 = inlierVec;
-        // } else if(close(bestFits.at(1), newLine) && inliers > bestFits.at(1).at(2)) {
-        //     bestFits.at(1) = newLine;
-        //     // inliers2 = inlierVec;
-        // } else {
-        //     size_t worstLineIdx {bestFits.at(0).at(2) > bestFits.at(1).at(2) ? 1 : 0};
-        //     if(inliers > bestFits.at(worstLineIdx).at(2) && !close(bestFits.at(1 - worstLineIdx), newLine)) {
-        //         bestFits.at(worstLineIdx) = newLine;
-        //         // if(worstLineIdx == 0) inliers1 = inlierVec;
-        //         // else inliers2 = inlierVec;
-        //     }
-        // }
 
         if(newLine.at(1) < 0) {
             if(inliers > bestFits.at(0).at(2)) {
@@ -287,51 +285,74 @@ std::vector<std::vector<double>> ransac(const PointCloud::ConstPtr &pcl) {
                 bestFits.at(1) = newLine;
             }
         }
-
-        // if(close(bestFits.at(0), newLine)) {
-        //     if(inliers > bestFits.at(0).at(2)) {
-        //         bestFits.at(0) = newLine;
-        //     }
-        // }
     }
 
     // For testing, print valid points to a csv file for graphing
-    std::cout << "--------------" << std::endl;
-    std::cout << "Final Slope: " << bestFits.at(0).at(0) << " Final Yint" << bestFits.at(0).at(1) << std::endl;
-    std::cout << "Inliers: " << bestFits.at(0).at(2) << " Distance: " << bestFits.at(0).at(3) << std::endl;
+    // std::cout << "--------------" << std::endl;
+    // std::cout << "Final Slope: " << bestFits.at(0).at(0) << " Final Yint" << bestFits.at(0).at(1) << std::endl;
+    // std::cout << "Inliers: " << bestFits.at(0).at(2) << " Distance: " << bestFits.at(0).at(3) << std::endl;
     // for(auto vec: inliers1) {
     //     std::cout << "Inlier: x: " << vec.at(0) << " y: " << vec.at(1) << " z: " << vec.at(2) << std::endl;
     // }
 
-    std::cout << "Final Slope: " << bestFits.at(1).at(0) << " Final Yint" << bestFits.at(1).at(1) << std::endl;
-    std::cout << "Inliers: " << bestFits.at(1).at(2) << " Distance: " << bestFits.at(1).at(3) << std::endl;
+    // std::cout << "Final Slope: " << bestFits.at(1).at(0) << " Final Yint" << bestFits.at(1).at(1) << std::endl;
+    // std::cout << "Inliers: " << bestFits.at(1).at(2) << " Distance: " << bestFits.at(1).at(3) << std::endl;
     // for(auto vec: inliers2) {
     //     std::cout << "Inlier: x: " << vec.at(0) << " y: " << vec.at(1) << " z: " << vec.at(2) << std::endl;
     // }
-    std::cout << "--------------" << std::endl;
+    int validPts {0};
     std::ofstream graphing("lineGraphing.csv");
     for(int i{0}; i < pcl->width; i++) {
         if(!isGroundPoint(pcl->points.at(i))) {
             graphing << pcl->points.at(i).x << "," << pcl->points.at(i).y << "," << pcl->points.at(i).z << "\n";
+            validPts++;
         }
     }
     graphing.close();
+    std::cout << "Valid Pts: " << validPts << std::endl;
+    validPtsGraph << counter << "," << validPts;
+    // std::cout << "--------------" << std::endl;
 
+    moveValidPtVecBack();
+    validPtVec.at(validPtVec.size() - 1) = validPts;
+
+    if(!(validPtVec.at(0) == -1)) {
+        double mean {0};
+        for(auto val : validPtVec) mean += val;
+        mean /= validPtVec.size();
+        validPtsGraph << "," << mean;
+    }
+    counter++;
+    validPtsGraph << "\n";
     return bestFits;
 }
 
+/**
+ * @brief Determine if two lines are too close to be different lines
+ * 
+ * @param line1 the first line
+ * @param line2 the second line
+ * 
+ * @return whether the two lines represent the same detected line
+ */
 bool close(std::vector<double> line1, std::vector<double> line2) {
-    // std::cout << line1.at(0) << ", " << line1.at(1) << "; " << line2.at(0) << ", " << line2.at(1) << " : ";
-    // if(std::abs(line1.at(0) - line2.at(0)) < 0.2) {
-    //     std::cout << (std::abs(line1.at(1) - line2.at(1)) < 0.3) << std::endl;
-    // }
-    // else std::cout << false << std::endl;
     if(std::abs(line1.at(0) - line2.at(0)) < 0.2) {
         return (std::abs(line1.at(1) - line2.at(1)) < 0.3);
     }
     return false;
 }
 
+/**
+ * @brief Determine the distance from a point to a line in standard form
+ * 
+ * @param x the x of the point
+ * @param y the y of the point
+ * @param a the a of the line
+ * @param b the b of the line
+ * @param c the c of the line
+ * 
+ * @return the distance from the point to the line in standard form
+ */
 double lineToPtDistance(double x, double y, double a, double b, double c) {
     return (((a * x) + (b * y) - c) / (std::sqrt(a*a + b*b)));
 }
@@ -344,6 +365,8 @@ int main(int argc, char **argv) {
         std::cout << "Expected 3 arguments: P, I, D" << std::endl;
         return -1;  // by convention, return a non-zero code to indicate error
     }
+
+    counter = 0;
 
     std::cout << std::boolalpha;
 
@@ -365,6 +388,8 @@ int main(int argc, char **argv) {
     controller.setMaxIOutput(0.2);
 
     ros::spin();
+
+    validPtsGraph.close();
 
     return 0;
 }
