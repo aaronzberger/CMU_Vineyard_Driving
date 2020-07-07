@@ -36,17 +36,21 @@ struct lineGroup {
 void clockCallback(const rosgraph_msgs::Clock::ConstPtr &msg);
 bool isGroundPoint(const pcl::PointXYZ &pt);
 void odomCallback(const nav_msgs::Odometry::ConstPtr &msg);
-void velodyneCallBack(const PointCloud::ConstPtr &msg);
+void velodyneCallBack(const PointCloud::ConstPtr &pcl);
 lineGroup ransac(const PointCloud::ConstPtr &pcl);
-bool close(std::vector<double> line1, std::vector<double> line2);
+bool close(line line1, line line2);
 double lineToPtDistance(double x, double y, double a, double b, double c);
 void moveLineVecsBack();
 void moveVinePtsVecBack();
+void moveVinePtsAveVecBack();
 
 double currentTime, yaw, x, y, lastMotionUpdate;
 ros::Publisher velPub, markerPub;
 PID controller;
 int counter, markerID;
+
+// 0: beginning of row, 1: middle: 2: end
+int currentState;
 
 //Storing the past lines for a moving average
 std::vector<std::vector<double>> tMinus2Lines;
@@ -57,6 +61,7 @@ std::vector<std::vector<double>> tPlus2Lines;
 
 //Storing the past number of valid points for a moving average
 std::vector<int> numVinePtsVec(49, -1);
+std::vector<double> numVinePtsAveVec(6, -1);
 
 std::ofstream vinePtsCounterFile("vinePointsCounter.csv");
 
@@ -117,7 +122,14 @@ void moveVinePtsVecBack() {
     }
 }
 
-void displayLine(line line, float r, float g, float b) {
+void moveVinePtsAveVecBack() {
+    int numPts = numVinePtsAveVec.size();
+    for(int i{1}; i < numPts; i++) {
+        numVinePtsAveVec.at(i - 1) = numVinePtsAveVec.at(i);
+    }
+}
+
+void displayLine(line line, float r, float g, float b, int id) {
     uint32_t shape = visualization_msgs::Marker::LINE_STRIP;
 
     visualization_msgs::Marker marker;
@@ -125,21 +137,25 @@ void displayLine(line line, float r, float g, float b) {
     marker.header.stamp = ros::Time::now();
 
     marker.ns = "shapes";
-    marker.id = markerID;
+    marker.id = id;
     marker.type = shape;
     marker.action = visualization_msgs::Marker::ADD;
 
     geometry_msgs::Point pt1;
     pt1.x = -100;
-    // pt1.y = (lines.at(0).at(0) * pt1.x) + lines.at(0).at(1);
     pt1.y = ((-(line.a / line.b)) * pt1.x) + (line.c / line.b);
     pt1.z = 0;
 
+    pt1.x += x;
+    pt1.y += y;
+
     geometry_msgs::Point pt2;
     pt2.x = 100;
-    // pt2.y = (lines.at(0).at(0) * pt2.x) + lines.at(0).at(1);
     pt2.y = ((-(line.a / line.b)) * pt2.x) + (line.c / line.b);
     pt2.z = 0;
+
+    pt2.x += x;
+    pt2.y += y;
 
     marker.points.push_back(pt1);
     marker.points.push_back(pt2);
@@ -152,163 +168,160 @@ void displayLine(line line, float r, float g, float b) {
     marker.color.b = b;
     marker.color.a = 1.0;
 
+    // std::cout << "X: " << pt1.x << "Y: " << pt1.y << std::endl;
+    // std::cout << "X: " << pt2.x << "Y: " << pt2.y << std::endl;
+
     marker.lifetime = ros::Duration();
     markerPub.publish(marker);
+
+    markerID++;
+}
+
+double getSlope(line line) {
+    return -(line.a / line.b);
+}
+
+double getYInt(line line) {
+    return -(line.c / line.b);
 }
 
 /**
  * @brief Update the output to the robot using Lidar data, through a PID controller
  * 
- * @param msg the message received from the Lidar ros topic (velodyne)
+ * @param pcl the message received from the Lidar ros topic (velodyne)
  */
-void velodyneCallBack(const PointCloud::ConstPtr &msg) {
+void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
     if(currentTime - lastMotionUpdate > 10) {
         // Collect the detected lines from the RANSAC algorithm
-        lineGroup lines {ransac(msg)};
+        lineGroup lines {ransac(pcl)};
 
-        // For testing, write a file with the contents of all the valid points in the most recent point cloud
+        // END OF ROW DETECTION
+        //***********************************************//
+        // std::ofstream points("points.csv");
         int numVinePts {0};
-        std::ofstream vinePointsFile("vinePoints.csv");
-        for(int i{0}; i < msg->width; i++) {
+        for(int i{0}; i < pcl->width; i++) {
             if(!isGroundPoint(pcl->points.at(i))) {
-                vinePointsFile << msg->points.at(i).x << "," << msg->points.at(i).y << "," << msg->points.at(i).z << "\n";
                 numVinePts++;
+                // points << pcl->points.at(i).x << "," << pcl->points.at(i).y << "\n";
             }
         }
-        vinePointsFile.close();
-        vinePtsCounterFile << counter << "," << numVinePts;
+        // points.close();
 
-        // // Detect the probable end of a row by keeping track of the number of vine points found
-        // moveVinePtsVecBack();
-        // numVinePtsVec.at(numVinePtsVec.size() - 1) = numVinePts;
+        // Detect the probable end of a row by keeping track of the number of vine points found
+        moveVinePtsVecBack();
+        numVinePtsVec.at(numVinePtsVec.size() - 1) = numVinePts;
 
-        // if(!(numVinePtsVec.at(0) == -1)) {
-        //     double movingAverage {0};
-        //     for(auto val : numVinePtsVec) movingAverage += val;
-        //     movingAverage /= numVinePtsVec.size();
-        //     vinePtsCounterFile << "," << movingAverage;
-        // }
-        // counter++;
-        // vinePtsCounterFile << "\n";
-
-        //Store the last 5 entries for a moving average smoothing filter
-        moveLineVecsBack();
-        tPlus2Lines = lines;
-
-        if(!tMinus2Lines.empty()) {
-            //Calculate the average of the last 5 lines
-            double leftLineSlope {(tMinus2Lines.at(0).at(0) + tMinus1Lines.at(0).at(0) + tZeroLines.at(0).at(0) + tPlus1Lines.at(0).at(0) + tPlus2Lines.at(0).at(0)) / 5.0};
-            double leftLineYint {(tMinus2Lines.at(0).at(1) + tMinus1Lines.at(0).at(1) + tZeroLines.at(0).at(1) + tPlus1Lines.at(0).at(1) + tPlus2Lines.at(0).at(1)) / 5.0};
-            double rightLineSlope {(tMinus2Lines.at(1).at(0) + tMinus1Lines.at(1).at(0) + tZeroLines.at(1).at(0) + tPlus1Lines.at(1).at(0) + tPlus2Lines.at(1).at(0)) / 5.0};
-            double rightLineYint {(tMinus2Lines.at(1).at(1) + tMinus1Lines.at(1).at(1) + tZeroLines.at(1).at(1) + tPlus1Lines.at(1).at(1) + tPlus2Lines.at(1).at(1)) / 5.0};
-
-            //DISPLAY DETECTED LINES IN RVIZ
-            //******************************************************//
-            uint32_t shape = visualization_msgs::Marker::LINE_STRIP;
-
-            visualization_msgs::Marker marker1;
-            marker1.header.frame_id = "odom";
-            marker1.header.stamp = ros::Time::now();
-
-            marker1.ns = "shapes";
-            marker1.id = 0;
-            marker1.type = shape;
-            marker1.action = visualization_msgs::Marker::ADD;
-
-            geometry_msgs::Point pt1;
-            pt1.x = -100;
-            // pt1.y = (lines.at(0).at(0) * pt1.x) + lines.at(0).at(1);
-            pt1.y = (leftLineSlope * pt1.x) + leftLineYint;
-            pt1.z = 0;
-
-            geometry_msgs::Point pt2;
-            pt2.x = 100;
-            // pt2.y = (lines.at(0).at(0) * pt2.x) + lines.at(0).at(1);
-            pt2.y = (leftLineSlope * pt2.x) + leftLineYint;
-            pt2.z = 0;
-
-            marker1.points.push_back(pt1);
-            marker1.points.push_back(pt2);
-
-            marker1.scale.x = 0.15;
-    
-            // Set the color -- be sure to set alpha to something non-zero!
-            marker1.color.r = 0.0f;
-            marker1.color.g = 1.0f;
-            marker1.color.b = 0.0f;
-            marker1.color.a = 1.0;
-    
-            marker1.lifetime = ros::Duration();
-            markerPub.publish(marker1);
-
-
-            visualization_msgs::Marker marker2;
-            marker2.header.frame_id = "odom";
-            marker2.header.stamp = ros::Time::now();
-
-            marker2.ns = "shapes";
-            marker2.id = 1;
-            marker2.type = shape;
-            marker2.action = visualization_msgs::Marker::ADD;
-
-            geometry_msgs::Point pt3;
-            pt3.x = -100;
-            // pt3.y = (lines.at(1).at(0) * pt3.x) + lines.at(1).at(1);
-            pt3.y = (rightLineSlope * pt3.x) + rightLineYint;
-            pt3.z = 0;
-
-            geometry_msgs::Point pt4;
-            pt4.x = 100;
-            // pt4.y = (lines.at(1).at(0) * pt4.x) + lines.at(1).at(1);
-            pt4.y = (rightLineSlope * pt4.x) + rightLineYint;
-            pt4.z = 0;
-
-            marker2.points.push_back(pt3);
-            marker2.points.push_back(pt4);
-
-            marker2.scale.x = 0.15;
-    
-            // Set the color -- be sure to set alpha to something non-zero!
-            marker2.color.r = 1.0f;
-            marker2.color.g = 0.0f;
-            marker2.color.b = 0.0f;
-            marker2.color.a = 1.0;
-    
-            marker2.lifetime = ros::Duration();
-            markerPub.publish(marker2);
-            //******************************************************//
-        
-            //Calculate the input for the PID controller
-            double angle {std::atan(rightLineSlope)};
-
-            //Run the PID controller
-            double angVel {controller.calculate(angle, currentTime)};
-
-            //Construct a velocity message to give to the Husky
-            geometry_msgs::Twist twist;
-
-            twist.linear.x = 0.3;
-            twist.linear.y = 0;
-            twist.linear.z = 0;
-
-            twist.angular.x = 0;
-            twist.angular.y = 0;
-            twist.angular.z = 0.0;
-
-            velPub.publish(twist);
-            lastMotionUpdate = currentTime;
+        if(!(numVinePtsVec.at(0) == -1)) {
+            double movingAverage {0};
+            for(auto val : numVinePtsVec) movingAverage += val;
+            movingAverage /= numVinePtsVec.size();
+            moveVinePtsAveVecBack();
+            numVinePtsAveVec.at(numVinePtsAveVec.size() - 1) = movingAverage;
         }
+
+        if(!numVinePtsAveVec.at(0) == -1) {
+            double firstHalfAve {((numVinePtsAveVec.at(0) + numVinePtsAveVec.at(1) + numVinePtsAveVec.at(2)) / 3.0)};
+            double secondHalfAve {((numVinePtsAveVec.at(3) + numVinePtsAveVec.at(4) + numVinePtsAveVec.at(5)) / 3.0)};
+
+            if(secondHalfAve - firstHalfAve > 5) std::cout << "Beginning" << std::endl;
+            else if(secondHalfAve - firstHalfAve < -5) std::cout << "End" << std::endl;
+            else std::cout << "Middle" << std::endl;
+        }
+
+        //***********************************************//
+
+        // Store the last 5 entries for a moving average smoothing filter
+        // moveLineVecsBack();
+        // tPlus2Lines = lines;
+
+        // if(!tMinus2Lines.empty()) {
+            // Calculate the average of the last 5 lines
+            // double leftLineSlope {(tMinus2Lines.at(0).at(0) + tMinus1Lines.at(0).at(0) + tZeroLines.at(0).at(0) + tPlus1Lines.at(0).at(0) + tPlus2Lines.at(0).at(0)) / 5.0};
+            // double leftLineYint {(tMinus2Lines.at(0).at(1) + tMinus1Lines.at(0).at(1) + tZeroLines.at(0).at(1) + tPlus1Lines.at(0).at(1) + tPlus2Lines.at(0).at(1)) / 5.0};
+            // double rightLineSlope {(tMinus2Lines.at(1).at(0) + tMinus1Lines.at(1).at(0) + tZeroLines.at(1).at(0) + tPlus1Lines.at(1).at(0) + tPlus2Lines.at(1).at(0)) / 5.0};
+            // double rightLineYint {(tMinus2Lines.at(1).at(1) + tMinus1Lines.at(1).at(1) + tZeroLines.at(1).at(1) + tPlus1Lines.at(1).at(1) + tPlus2Lines.at(1).at(1)) / 5.0};
+
+
+            if(!(lines.lines.size() == 0)) {
+                int numLines {lines.lines.size()};
+
+                // Display the originally detected line in green
+                displayLine(lines.lines.at(0), 0, 1, 0, 0);
+                displayLine(lines.lines.at(1), 1, 0, 0, 1);
+
+                std::cout << "M: " << getSlope(lines.lines.at(0)) << " B: " << getYInt(lines.lines.at(0)) <<
+                             "M: " << getSlope(lines.lines.at(1)) << " B: " << getYInt(lines.lines.at(1)) << std::endl;
+                std::cout << "Main Inliers: " << lines.lines.at(0).inliers << " Second: " << lines.lines.at(1).inliers << std::endl;
+
+                // std::cout << "Main Inliers: " << lines.lines.at(0).inliers << std::endl;
+
+                // Display all the other lines in red
+                // int counter {1};
+                // for(int i {0}; i < lines.lines.size() - 1; i++) {
+                //     displayLine(lines.lines.at(i), 1, 0, 0, counter);
+                //     counter++;
+                // }
+
+                // Display a line a certain distance away from the original
+                // double distance {-2.9};
+                // displayLine(lines.lines.at(0), 0, 1, 0, 0);
+                // line line;
+                // line.a = lines.lines.at(0).a;
+                // line.b = lines.lines.at(0).b;
+                // line.c = -(distance*line.b) + lines.lines.at(0).c;
+                // line.inliers = lines.lines.at(0).inliers;
+                // line.distance = lines.lines.at(0).distance;
+                // displayLine(line, 1, 0, 0, 1);
+                
+                //Calculate the input for the PID controller
+                double angle {std::atan(-(lines.lines.at(0).a / lines.lines.at(0).b))};
+
+                //Run the PID controller
+                double angVel {controller.calculate(angle, currentTime)};
+
+                //Construct a velocity message to give to the Husky
+                geometry_msgs::Twist twist;
+
+                twist.linear.x = 0.0;
+                twist.linear.y = 0;
+                twist.linear.z = 0;
+
+                twist.angular.x = 0;
+                twist.angular.y = 0;
+                twist.angular.z = 0.0;
+
+                velPub.publish(twist);
+                lastMotionUpdate = currentTime;
+            } else {
+                std::cout << "Size " << lines.lines.size() << " Inliers " << lines.totalInliers << std::endl;
+                std::cout << "NO LINE GROUP FOUND" << std::endl;
+            }
+        // }
     }
 }
 
 lineGroup ransac(const PointCloud::ConstPtr &pcl) {
-    double inlierThreshold {0.3};
+    double inlierThreshold {0.39};
     int numLoops {500};
-    int minInlierThreshold {20};
+    int minInlierThreshold {50};
     double distanceBetweenLines {3.5};
 
     lineGroup bestLineGroup;
     bestLineGroup.totalInliers = 0;
+
+    line bestLine;
+    bestLine.inliers = 0;
+    bestLine.a = 0;
+    bestLine.b = 0;
+    bestLine.c = 0;
+    bestLine.distance = 0;
+
+    bestLineGroup.lines.push_back(bestLine);
+
+    // bestLineGroup.lines.push_back(line1);
+    // bestLineGroup.lines.push_back(line1);
+    // bestLineGroup.lines.push_back(line1);
+    // bestLineGroup.totalInliers = -1;
 
     for(int i{0}; i < numLoops; i++) {
         // Find two random points for RANSAC line detection
@@ -322,56 +335,144 @@ lineGroup ransac(const PointCloud::ConstPtr &pcl) {
         }
 
         // Construct a line from those two random points
-        double a {pcl->points.at(pt2Idx).y - pcl->points.at(pt1Idx).y};
-        double b {pcl->points.at(pt1Idx).x - pcl->points.at(pt2Idx).x};
-        double c {(a * pcl->points.at(pt1Idx).x) + (b * pcl->points.at(pt1Idx).y)};
+        line currentLine;
+        currentLine.a = pcl->points.at(pt2Idx).y - pcl->points.at(pt1Idx).y;
+        currentLine.b = pcl->points.at(pt1Idx).x - pcl->points.at(pt2Idx).x;
+        currentLine.c = (currentLine.a * pcl->points.at(pt1Idx).x) + (currentLine.b * pcl->points.at(pt1Idx).y);
 
-        // Calculate how many inliers that line has
-        // for(int j{0}; j < pcl->width; j++) {
-        //     if(!isGroundPoint(pcl->points.at(j))) {
-        //         double distance {lineToPtDistance(pcl->points.at(j).x, pcl->points.at(j).y, a, b, c)};
-        //         if(std::abs(distance) < inlierThreshold) {
-        //             inliers++;
+        // Determine the number of inliers in the originally detected line
+        currentLine.inliers = 0;
+        for(int j{0}; j < pcl->width; j++) {
+            if(!isGroundPoint(pcl->points.at(j))) {
+                double distance {lineToPtDistance(pcl->points.at(j).x, pcl->points.at(j).y, currentLine.a, currentLine.b, currentLine.c)};
+                if(std::abs(distance) <= inlierThreshold) currentLine.inliers++;
+            }
+        }
+
+        // Determine the current distance to that line
+        currentLine.distance = lineToPtDistance(x, y, currentLine.a, currentLine.b, currentLine.c);
+
+        // Construct a contestant line group from that original line
+        if(getYInt(currentLine) < 0) {
+            lineGroup currentLineGroup;
+            currentLineGroup.lines.push_back(currentLine);
+            currentLineGroup.totalInliers = currentLine.inliers;
+
+            // Construct a complementary line that is parallel to the original line and add it to the line group
+            line rightLine;
+            rightLine.a = currentLine.a;
+            rightLine.b = currentLine.b;
+            rightLine.c = -(distanceBetweenLines * currentLine.b) + currentLine.c;
+
+            rightLine.inliers = 0;
+            for(int j{0}; j < pcl->width; j++) {
+                if(!isGroundPoint(pcl->points.at(j))) {
+                    double distance {lineToPtDistance(pcl->points.at(j).x, pcl->points.at(j).y, rightLine.a, rightLine.b, rightLine.c)};
+                    if(std::abs(distance) <= inlierThreshold) rightLine.inliers++;
+                }
+            }
+
+            rightLine.distance = lineToPtDistance(x, y, rightLine.a, rightLine.b, rightLine.c);
+
+            currentLineGroup.lines.push_back(rightLine);
+            // currentLineGroup.totalInliers += rightLine.inliers;
+
+            // Find the best line group
+            if(currentLineGroup.totalInliers >= bestLineGroup.totalInliers) bestLineGroup = currentLineGroup;
+        }
+        
+        // currentLineGroup.lines.push_back(line);
+        // currentLineGroup.totalInliers = inliers;
+        // if(currentLineGroup.totalInliers > bestLineGroup.totalInliers) bestLineGroup = currentLineGroup;
+
+        // If the original line is strong enough, look around for other parallel vine rows
+        // if(inliers >= minInlierThreshold && -(c/b) < 0) {
+
+        //     int lookaroundRadius {1};
+
+        //     for(int i {-lookaroundRadius}; i <= lookaroundRadius; i++) {
+        //         line line;
+        //         line.a = a;
+        //         line.b = b;
+        //         line.c = -((i * distanceBetweenLines) * line.b) + c;
+        //         line.distance = lineToPtDistance(x, y, line.a, line.b, line.c);
+        //         line.inliers = 0;
+        //         for(int j{0}; j < pcl->width; j++) {
+        //             if(!isGroundPoint(pcl->points.at(j))) {
+        //                 double distance {lineToPtDistance(pcl->points.at(j).x, pcl->points.at(j).y, line.a, line.b, line.c)};
+        //                 if(std::abs(distance) <= inlierThreshold) line.inliers++;
+        //             }
+        //         }
+        //         if(line.inliers > minInlierThreshold) {
+        //             currentLineGroup.totalInliers += line.inliers;
+        //             currentLineGroup.lines.push_back(line);
         //         }
         //     }
         // }
-
-        // Determine the number of inliers in the originally detected line
-        int inliers {0};
-        for(int j{0}; i < pcl->width; j++) {
-            if(!isGroundPoint(pcl->points.at(j))) {
-                double distance {lineToPtDistance(pcl->points.at(j).x, pcl->points.at(j).y, a, b, c)};
-                if(std::abs(distance) < inlierThreshold) inliers++;
-            }
-        }
-
-        // If the original line is strong enough, look around for other parallel vine rows
-        if(inliers > minInlierThreshold) {
-            lineGroup lineGroup;
-            lineGroup.totalInliers = 0;
-
-            int lookaroundRadius{2};
-
-            for(int i{-lookaroundRadius}; i <= lookaroundRadius; i++) {
-                line line;
-                line.a = a;
-                line.b = b;
-                line.c = c + (i * distanceBetweenLines);
-                line.distance = lineToPtDistance(x, y, line.a, line.b, line.c);
-                line.inliers = 0;
-                for(int j{0}; i < pcl->width; j++) {
-                    if(!isGroundPoint(pcl->points.at(j))) {
-                        double distance {lineToPtDistance(pcl->points.at(j).x, pcl->points.at(j).y, line.a, line.b, line.c)};
-                        if(std::abs(distance) < inlierThreshold) line.inliers++;
-                    }
-                }
-                lineGroup.totalInliers += line.inliers;
-                lineGroup.lines.push_back(line);
-            }
-        }
-
-        if(lineGroup.totalInliers > bestLineGroup.totalInliers) bestLineGroup = lineGroup;
+        // if(currentLineGroup.totalInliers > bestLineGroup.totalInliers) bestLineGroup = currentLineGroup;
     }
+
+    // Scan c values around the best line and look for the best other lines
+
+    // double cStep {0.1};
+
+    // line temp;
+    // temp.inliers = 0;
+    // temp.a = 0;
+    // temp.b = 0;
+    // temp.c = 0;
+
+    // bestLineGroup.lines.push_back(temp);
+    // bestLineGroup.lines.push_back(temp);
+    // bestLineGroup.lines.push_back(bestLine);
+
+    // for(double i {-100}; i <= -10; i++) {
+    //     line line;
+    //     line.a = bestLine.a;
+    //     line.b = bestLine.b;
+    //     line.c = bestLine.c + (cStep * i);
+    //     line.inliers = 0;
+    //     for(int j{0}; j < pcl->width; j++) {
+    //         if(!isGroundPoint(pcl->points.at(j))) {
+    //             double distance {lineToPtDistance(pcl->points.at(j).x, pcl->points.at(j).y, line.a, line.b, line.c)};
+    //             if(std::abs(distance) <= inlierThreshold) line.inliers++;
+    //         }
+    //     }
+    //     if(close(line, bestLineGroup.lines.at(0)) && line.inliers > bestLineGroup.lines.at(0).inliers) {
+    //         bestLineGroup.lines.at(0) = line;
+    //     } else if(close(line, bestLineGroup.lines.at(1)) && line.inliers > bestLineGroup.lines.at(1).inliers) {
+    //         bestLineGroup.lines.at(1) = line;
+    //     } else {
+    //         size_t worstLineIdx {bestLineGroup.lines.at(0).inliers > bestLineGroup.lines.at(1).inliers ? 1 : 0};
+    //         if(line.inliers > bestLineGroup.lines.at(worstLineIdx).inliers && !close(line, bestLineGroup.lines.at(1 - worstLineIdx))) {
+    //             bestLineGroup.lines.at(worstLineIdx) = line;
+    //         }
+    //     }
+    // }
+
+    // for(double i {10}; i <= 100; i++) {
+    //     line line;
+    //     line.a = bestLine.a;
+    //     line.b = bestLine.b;
+    //     line.c = bestLine.c + (cStep * i);
+    //     line.inliers = 0;
+    //     for(int j{0}; j < pcl->width; j++) {
+    //         if(!isGroundPoint(pcl->points.at(j))) {
+    //             double distance {lineToPtDistance(pcl->points.at(j).x, pcl->points.at(j).y, line.a, line.b, line.c)};
+    //             if(std::abs(distance) <= inlierThreshold) line.inliers++;
+    //         }
+    //     }
+    //     if(close(line, bestLineGroup.lines.at(0)) && line.inliers > bestLineGroup.lines.at(0).inliers) {
+    //         bestLineGroup.lines.at(0) = line;
+    //     } else if(close(line, bestLineGroup.lines.at(1)) && line.inliers > bestLineGroup.lines.at(1).inliers) {
+    //         bestLineGroup.lines.at(1) = line;
+    //     } else {
+    //         size_t worstLineIdx {bestLineGroup.lines.at(0).inliers > bestLineGroup.lines.at(1).inliers ? 1 : 0};
+    //         if(line.inliers > bestLineGroup.lines.at(worstLineIdx).inliers && !close(line, bestLineGroup.lines.at(1 - worstLineIdx))) {
+    //             bestLineGroup.lines.at(worstLineIdx) = line;
+    //         }
+    //     }
+    // }
     return bestLineGroup;
 }
 
@@ -383,9 +484,9 @@ lineGroup ransac(const PointCloud::ConstPtr &pcl) {
  * 
  * @return whether the two lines represent the same detected line
  */
-bool close(std::vector<double> line1, std::vector<double> line2) {
-    if(std::abs(line1.at(0) - line2.at(0)) < 0.2) {
-        return (std::abs(line1.at(1) - line2.at(1)) < 0.3);
+bool close(line line1, line line2) {
+    if(std::abs(-(line1.a/line1.b) - (-(line2.a/line2.b))) < 0.2) {
+        return (std::abs((line1.c/line1.b) - (line2.c/line2.b)) < 1.0);
     }
     return false;
 }
