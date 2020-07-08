@@ -76,7 +76,7 @@ void PID::setPID(double p, double i, double d) {
 void PID::setMaxIOutput(double maxIOutput) {
     this->maxIOutput = maxIOutput;
     //Set a maxError to avoid windup
-    if(maxIOutput != nan) {
+    if(maxIOutput != nan && kI != 0) {
         maxError = maxIOutput / kI;
     }
 }
@@ -108,6 +108,7 @@ void PID::setSetPoint(double setPoint) {
  */
 void PID::setInverted(bool inverted) {
     this->inverted = inverted;
+    checkGainSigns();
 }
 
 /**
@@ -128,7 +129,7 @@ double PID::calculate(double sensorData, double setPoint, double time) {
     }
 
     this->setPoint = setPoint;
-    double dt = time - lastTime;
+    double dt = (time - lastTime) / 1000;
 
     double error = sensorData - setPoint;
 
@@ -143,14 +144,13 @@ double PID::calculate(double sensorData, double setPoint, double time) {
     double iOutput{kI * integral};
 
     iOutput = clamp(iOutput, -maxIOutput, maxIOutput);
-    
+
     //Calculate D
     double derivative{(sensorData - lastSensorData) / dt};
-    double dOutput{derivative * kD * -1};
+    double dOutput{derivative * kD};
 
     //Calculate the total
     double totalOutput{pOutput + iOutput + dOutput};
-    //std::cout << "P: " << pOutput << " I: " << iOutput << " D" << dOutput << std::endl;
     totalOutput = clamp(totalOutput, -maxOutput, maxOutput);
     
     this->lastSensorData = sensorData;
@@ -183,9 +183,9 @@ void PID::reset() {
  */
 void PID::checkGainSigns() {
     if(inverted) {
-        kP = -std::abs(kP);
-        kI = -std::abs(kI);
-        kD = -std::abs(kD);
+        kP = std::abs(kP) * -1;
+        kI = std::abs(kI) * -1;
+        kD = std::abs(kD) * -1;
     } else {
         kP = std::abs(kP);
         kI = std::abs(kI);

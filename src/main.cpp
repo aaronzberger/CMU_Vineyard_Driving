@@ -19,7 +19,6 @@
 #include "opencv2/imgcodecs.hpp"
 #include <png++/png.hpp>
 
-
 typedef pcl::PointCloud<pcl::PointXYZ> PointCloud;
 
 struct line {
@@ -32,7 +31,7 @@ struct lineGroup {
     int totalInliers;
 };
 
-//Function Prototypes
+// Function Prototypes
 void clockCallback(const rosgraph_msgs::Clock::ConstPtr &msg);
 bool isGroundPoint(const pcl::PointXYZ &pt);
 void odomCallback(const nav_msgs::Odometry::ConstPtr &msg);
@@ -41,7 +40,6 @@ void displayLine(line line, float r, float g, float b, int id);
 lineGroup ransac(const PointCloud::ConstPtr &pcl);
 bool close(line line1, line line2);
 double lineToPtDistance(double x, double y, double a, double b, double c);
-void moveLineVecsBack();
 void moveVinePtsVecBack();
 void moveVinePtsAveVecBack();
 double getSlope(line line);
@@ -52,16 +50,10 @@ double currentTime, yaw, x, y, lastMotionUpdate;
 ros::Publisher velPub, markerPub;
 PID controller;
 
-//Storing the past lines for a moving average
-std::vector<std::vector<double>> tMinus2Lines;
-std::vector<std::vector<double>> tMinus1Lines;
-std::vector<std::vector<double>> tZeroLines;
-std::vector<std::vector<double>> tPlus1Lines;
-std::vector<std::vector<double>> tPlus2Lines;
-
 //Storing the past number of valid points for a moving average
 std::vector<int> numVinePtsVec(49, -1);
 std::vector<double> numVinePtsAveVec(6, -1);
+std::vector<double> lineTrackerFilter(5, -99);
 
 /**
  * @brief Updates the current time variable
@@ -101,22 +93,22 @@ void odomCallback(const nav_msgs::Odometry::ConstPtr &msg) {
 }
 
 /**
- * @brief Move back the past lines to make room for a new one every frame
- */
-void moveLineVecsBack() {
-    tMinus2Lines = tMinus1Lines;
-    tMinus1Lines = tZeroLines;
-    tZeroLines = tPlus1Lines;
-    tPlus1Lines = tPlus2Lines;
-}
-
-/**
  * @brief Move back the past valid points to make room for a new value every frame
  */
 void moveVinePtsVecBack() {
     int numPts = numVinePtsVec.size();
     for(int i{1}; i < numPts; i++) {
         numVinePtsVec.at(i - 1) = numVinePtsVec.at(i);
+    }
+}
+
+/**
+ * @brief Move back the past y-intercepts for line tracking to make room for more recent measurements each frame
+ */
+void moveLineTrackerFilterBack() {
+    int numPts = lineTrackerFilter.size();
+    for(int i{1}; i < numPts; i++) {
+        lineTrackerFilter.at(i - 1) = lineTrackerFilter.at(i);
     }
 }
 
@@ -216,15 +208,12 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
 
         // DETECTING THE END OF A ROW
         //***********************************************//
-        // std::ofstream points("points.csv");
         int numVinePts {0};
         for(int i{0}; i < pcl->width; i++) {
             if(!isGroundPoint(pcl->points.at(i))) {
                 numVinePts++;
-                // points << pcl->points.at(i).x << "," << pcl->points.at(i).y << "\n";
             }
         }
-        // points.close();
 
         // Detect the probable end of a row by keeping track of the number of vine points found
         moveVinePtsVecBack();
@@ -249,81 +238,62 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
 
         //***********************************************//
 
-        // Store the last 5 entries for a moving average smoothing filter
-        // moveLineVecsBack();
-        // tPlus2Lines = lines;
+        if(!(lines.lines.size() == 0)) {
 
-        // if(!tMinus2Lines.empty()) {
-            // Calculate the average of the last 5 lines
-            // double leftLineSlope {(tMinus2Lines.at(0).at(0) + tMinus1Lines.at(0).at(0) + tZeroLines.at(0).at(0) + tPlus1Lines.at(0).at(0) + tPlus2Lines.at(0).at(0)) / 5.0};
-            // double leftLineYint {(tMinus2Lines.at(0).at(1) + tMinus1Lines.at(0).at(1) + tZeroLines.at(0).at(1) + tPlus1Lines.at(0).at(1) + tPlus2Lines.at(0).at(1)) / 5.0};
-            // double rightLineSlope {(tMinus2Lines.at(1).at(0) + tMinus1Lines.at(1).at(0) + tZeroLines.at(1).at(0) + tPlus1Lines.at(1).at(0) + tPlus2Lines.at(1).at(0)) / 5.0};
-            // double rightLineYint {(tMinus2Lines.at(1).at(1) + tMinus1Lines.at(1).at(1) + tZeroLines.at(1).at(1) + tPlus1Lines.at(1).at(1) + tPlus2Lines.at(1).at(1)) / 5.0};
+            // Use a moving average filter for the Y-intercept of the tracking line for de-noising
+            moveLineTrackerFilterBack();
+            lineTrackerFilter.at(lineTrackerFilter.size() - 1) = getYInt(lines.lines.at(2));
 
-
-            if(!(lines.lines.size() == 0)) {
-                int numLines {lines.lines.size()};
-
-                // Display the originally detected line in green
-                displayLine(lines.lines.at(0), 0, 1, 0, 0);
-
-                // Display the complementary parallel line in red
-                displayLine(lines.lines.at(1), 1, 0, 0, 1);
-
-                // std::cout << "M: " << getSlope(lines.lines.at(0)) << " B: " << getYInt(lines.lines.at(0)) <<
-                //              "M: " << getSlope(lines.lines.at(1)) << " B: " << getYInt(lines.lines.at(1)) << std::endl;
-                // std::cout << "Main Inliers: " << lines.lines.at(0).inliers << " Second: " << lines.lines.at(1).inliers << std::endl;
-
-                // Display all the other lines in red
-                // int counter {1};
-                // for(int i {0}; i < lines.lines.size() - 1; i++) {
-                //     displayLine(lines.lines.at(i), 1, 0, 0, counter);
-                //     counter++;
-                // }
-
-                // Display a line a certain distance away from the original
-                // double distance {-2.9};
-                // displayLine(lines.lines.at(0), 0, 1, 0, 0);
-                // line line;
-                // line.a = lines.lines.at(0).a;
-                // line.b = lines.lines.at(0).b;
-                // line.c = -(distance*line.b) + lines.lines.at(0).c;
-                // line.inliers = lines.lines.at(0).inliers;
-                // line.distance = lines.lines.at(0).distance;
-                // displayLine(line, 1, 0, 0, 1);
-                
-                //Calculate the input for the PID controller
-                double angle {std::atan(-(lines.lines.at(0).a / lines.lines.at(0).b))};
-
-                //Run the PID controller
-                double angVel {controller.calculate(angle, currentTime)};
-
-                //Construct a velocity message to give to the Husky
-                geometry_msgs::Twist twist;
-
-                twist.linear.x = 0.0;
-                twist.linear.y = 0;
-                twist.linear.z = 0;
-
-                twist.angular.x = 0;
-                twist.angular.y = 0;
-                twist.angular.z = 0.0;
-
-                velPub.publish(twist);
-                lastMotionUpdate = currentTime;
-            } else {
-                std::cout << "Size " << lines.lines.size() << " Inliers " << lines.totalInliers << std::endl;
-                std::cout << "NO LINE GROUP FOUND" << std::endl;
+            double yIntAve {0};
+            if(!(lineTrackerFilter.at(0) == -99)) {
+                for(auto val : lineTrackerFilter) yIntAve += val;
+                yIntAve /= lineTrackerFilter.size();
             }
-        // }
+            int numLines {lines.lines.size()};
+
+            // Display the originally detected line in green
+            displayLine(lines.lines.at(0), 0, 1, 0, 0);
+
+            // Display the complementary parallel line in red
+            displayLine(lines.lines.at(1), 1, 0, 0, 1);
+
+            // Display the tracking line in blue
+            displayLine(lines.lines.at(2), 0, 0, 1, 2);
+
+            //Run the PID controller
+            double angVel {controller.calculate(yIntAve, currentTime)};
+
+            //Construct a velocity message to give to the Husky
+            geometry_msgs::Twist twist;
+
+            twist.linear.x = 0.2;
+            twist.linear.y = 0;
+            twist.linear.z = 0;
+
+            twist.angular.x = 0;
+            twist.angular.y = 0;
+            twist.angular.z = angVel;
+
+            velPub.publish(twist);
+            lastMotionUpdate = currentTime;
+        } else {
+            std::cout << "Size " << lines.lines.size() << " Inliers " << lines.totalInliers << std::endl;
+            std::cout << "NO LINE GROUP FOUND" << std::endl;
+        }
     }
 }
 
+/**
+ * @brief Perform a RANSAC line detection on an XYZ Point Cloud
+ * 
+ * @param pcl the point cloud received from the Lidar (vlp16)
+ * @return the group of lines that the line detection yielded
+ */
 lineGroup ransac(const PointCloud::ConstPtr &pcl) {
     double inlierThreshold {0.39};
-    int numLoops {500};
+    int numLoops {250};
     int minInlierThreshold {50};
-    double distanceBetweenLines {3.5};
+    double distanceBetweenLines {2.9};
 
     lineGroup bestLineGroup;
     bestLineGroup.totalInliers = 0;
@@ -391,6 +361,15 @@ lineGroup ransac(const PointCloud::ConstPtr &pcl) {
             if(currentLineGroup.totalInliers >= bestLineGroup.totalInliers) bestLineGroup = currentLineGroup;
         }
     }
+
+    // Construct a line in the middle of the other two lines as a tracker
+    line tracker;
+    tracker.a = bestLineGroup.lines.at(0).a;
+    tracker.b = bestLineGroup.lines.at(0).b;
+    tracker.c = (bestLineGroup.lines.at(0).c + bestLineGroup.lines.at(1).c) / 2;
+    tracker.distance = lineToPtDistance(x, y, tracker.a, tracker.b, tracker.c);
+
+    bestLineGroup.lines.push_back(tracker);
     return bestLineGroup;
 }
 
@@ -421,7 +400,7 @@ bool close(line line1, line line2) {
  * @return the distance from the point to the line in standard form
  */
 double lineToPtDistance(double x, double y, double a, double b, double c) {
-    return (((a * x) + (b * y) - c) / (std::sqrt(a*a + b*b)));
+    return (std::abs((a * x) + (b * y) - c) / (std::sqrt(a*a + b*b)));
 }
 
 /**
@@ -459,7 +438,7 @@ int main(int argc, char **argv) {
 
     controller = PID(std::atof(argv[1]), std::atof(argv[2]), std::atof(argv[3]));
 
-    controller.setInverted(false);
+    controller.setInverted(true);
     controller.setSetPoint(0);
     controller.setOutputLimits(-0.4, 0.4);
     controller.setMaxIOutput(0.2);
