@@ -40,19 +40,21 @@ void displayLine(line line, float r, float g, float b, int id);
 lineGroup ransac(const PointCloud::ConstPtr &pcl);
 bool close(line line1, line line2);
 double lineToPtDistance(double x, double y, double a, double b, double c);
-void moveVinePtsVecBack();
-void moveVinePtsAveVecBack();
 double getSlope(line line);
 double getYInt(line line);
 void printPointCloud(const PointCloud::ConstPtr &pcl);
+void moveIntVecBack(std::vector<int> &vec);
+void moveDoubleVecBack(std::vector<double> &vec);
 
 double currentTime, yaw, x, y, lastMotionUpdate;
 ros::Publisher velPub, markerPub;
 PID controller;
+int endOfRowCounter;
+int startOfRowCounter;
+bool turning;
 
 //Storing the past number of valid points for a moving average
-std::vector<int> numVinePtsVec(49, -1);
-std::vector<double> numVinePtsAveVec(6, -1);
+std::vector<int> numAheadPtsVec(49, -1);
 std::vector<double> lineTrackerFilter(5, -99);
 
 /**
@@ -92,33 +94,18 @@ void odomCallback(const nav_msgs::Odometry::ConstPtr &msg) {
     yaw = tf::getYaw(quat);
 }
 
-/**
- * @brief Move back the past valid points to make room for a new value every frame
- */
-void moveVinePtsVecBack() {
-    int numPts = numVinePtsVec.size();
+//Replace with template function
+void moveDoubleVecBack(std::vector<double> &vec) {
+    int numPts = vec.size();
     for(int i{1}; i < numPts; i++) {
-        numVinePtsVec.at(i - 1) = numVinePtsVec.at(i);
+        vec.at(i - 1) = vec.at(i);
     }
 }
 
-/**
- * @brief Move back the past y-intercepts for line tracking to make room for more recent measurements each frame
- */
-void moveLineTrackerFilterBack() {
-    int numPts = lineTrackerFilter.size();
+void moveIntVecBack(std::vector<int> &vec) {
+    int numPts = vec.size();
     for(int i{1}; i < numPts; i++) {
-        lineTrackerFilter.at(i - 1) = lineTrackerFilter.at(i);
-    }
-}
-
-/**
- * @brief Move back the past valid point averages to make room for a new value every frame
- */
-void moveVinePtsAveVecBack() {
-    int numPts = numVinePtsAveVec.size();
-    for(int i{1}; i < numPts; i++) {
-        numVinePtsAveVec.at(i - 1) = numVinePtsAveVec.at(i);
+        vec.at(i - 1) = vec.at(i);
     }
 }
 
@@ -206,42 +193,55 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
         // Collect the detected lines from the RANSAC algorithm
         lineGroup lines {ransac(pcl)};
 
-        // DETECTING THE END OF A ROW
+        // DETERMINE TURNING OR DRIVING
         //***********************************************//
-        int numVinePts {0};
+
+        // Determine the ratio of points ahead of the robot
+        int numValidPts {0};
+        int numAheadPts {0};
         for(int i{0}; i < pcl->width; i++) {
             if(!isGroundPoint(pcl->points.at(i))) {
-                numVinePts++;
+                numValidPts++;
+                if(pcl->points.at(i).x > 0) numAheadPts++;
             }
         }
+        std::cout << "Ahead/Valid: " << static_cast<int>((static_cast<double>(numAheadPts)/numValidPts) * 100) << "%" << std::endl;
+        double aheadRatio {static_cast<double>(numAheadPts) / numValidPts};
 
-        // Detect the probable end of a row by keeping track of the number of vine points found
-        moveVinePtsVecBack();
-        numVinePtsVec.at(numVinePtsVec.size() - 1) = numVinePts;
-
-        if(!(numVinePtsVec.at(0) == -1)) {
-            double movingAverage {0};
-            for(auto val : numVinePtsVec) movingAverage += val;
-            movingAverage /= numVinePtsVec.size();
-            moveVinePtsAveVecBack();
-            numVinePtsAveVec.at(numVinePtsAveVec.size() - 1) = movingAverage;
+        // Decide if we should switch modes
+        if(!turning) {
+            if(aheadRatio < 0.2) endOfRowCounter++;
+            if(endOfRowCounter > 20) {
+                turning = true;
+                endOfRowCounter = 0;
+            }
+        } else {
+            if(aheadRatio > 0.75) startOfRowCounter++;
+            if(startOfRowCounter > 20) {
+                turning = false;
+                startOfRowCounter = 0;
+            }
         }
-
-        if(!numVinePtsAveVec.at(0) == -1) {
-            double firstHalfAve {((numVinePtsAveVec.at(0) + numVinePtsAveVec.at(1) + numVinePtsAveVec.at(2)) / 3.0)};
-            double secondHalfAve {((numVinePtsAveVec.at(3) + numVinePtsAveVec.at(4) + numVinePtsAveVec.at(5)) / 3.0)};
-
-            if(secondHalfAve - firstHalfAve > 5) std::cout << "Beginning" << std::endl;
-            else if(secondHalfAve - firstHalfAve < -5) std::cout << "End" << std::endl;
-            else std::cout << "Middle" << std::endl;
-        }
-
         //***********************************************//
 
-        if(!(lines.lines.size() == 0)) {
+        if(turning) {
+            // Construct a velocity message to give to the Husky based on basic constant angular velocity turning
+            geometry_msgs::Twist twist;
+
+            twist.linear.x = 0.4;
+            twist.linear.y = 0;
+            twist.linear.z = 0;
+
+            twist.angular.x = 0;
+            twist.angular.y = 0;
+            twist.angular.z = twist.linear.x / (2.9 / 2);
+
+            velPub.publish(twist);
+            lastMotionUpdate = currentTime;
+        } else if(!(lines.lines.size() == 0)) {
 
             // Use a moving average filter for the Y-intercept of the tracking line for de-noising
-            moveLineTrackerFilterBack();
+            moveDoubleVecBack(lineTrackerFilter);
             lineTrackerFilter.at(lineTrackerFilter.size() - 1) = getYInt(lines.lines.at(2));
 
             double yIntAve {0};
@@ -252,10 +252,10 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
             int numLines {lines.lines.size()};
 
             // Display the originally detected line in green
-            displayLine(lines.lines.at(0), 0, 1, 0, 0);
+            // displayLine(lines.lines.at(0), 0, 1, 0, 0);
 
             // Display the complementary parallel line in red
-            displayLine(lines.lines.at(1), 1, 0, 0, 1);
+            // displayLine(lines.lines.at(1), 1, 0, 0, 1);
 
             // Display the tracking line in blue
             displayLine(lines.lines.at(2), 0, 0, 1, 2);
@@ -332,7 +332,7 @@ lineGroup ransac(const PointCloud::ConstPtr &pcl) {
         currentLine.distance = lineToPtDistance(x, y, currentLine.a, currentLine.b, currentLine.c);
 
         // Construct a contestant line group from the original line
-        if(getYInt(currentLine) < 0) {
+        if(getYInt(currentLine) < 0 && getYInt(currentLine) > -distanceBetweenLines) {
             lineGroup currentLineGroup;
             currentLineGroup.lines.push_back(currentLine);
             currentLineGroup.totalInliers = currentLine.inliers;
@@ -427,6 +427,9 @@ int main(int argc, char **argv) {
     std::cout << std::boolalpha;
 
     ros::NodeHandle n;
+
+    endOfRowCounter = 0;
+    startOfRowCounter = 0;
 
     std::srand(std::time(nullptr));
 
