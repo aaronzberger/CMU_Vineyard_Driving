@@ -43,8 +43,7 @@ double lineToPtDistance(double x, double y, double a, double b, double c);
 double getSlope(line line);
 double getYInt(line line);
 void printPointCloud(const PointCloud::ConstPtr &pcl);
-void moveIntVecBack(std::vector<int> &vec);
-void moveDoubleVecBack(std::vector<double> &vec);
+template <typename T> void moveVecBack(std::vector<T> &vec);
 
 double currentTime, yaw, x, y, lastMotionUpdate;
 ros::Publisher velPub, markerPub;
@@ -52,6 +51,9 @@ PID controller;
 int endOfRowCounter;
 int startOfRowCounter;
 bool turning;
+
+// USER PARAMETERS
+constexpr double distanceBetweenRows = 2.9;
 
 //Storing the past number of valid points for a moving average
 std::vector<int> numAheadPtsVec(49, -1);
@@ -94,15 +96,12 @@ void odomCallback(const nav_msgs::Odometry::ConstPtr &msg) {
     yaw = tf::getYaw(quat);
 }
 
-//Replace with template function
-void moveDoubleVecBack(std::vector<double> &vec) {
-    int numPts = vec.size();
-    for(int i{1}; i < numPts; i++) {
-        vec.at(i - 1) = vec.at(i);
-    }
-}
-
-void moveIntVecBack(std::vector<int> &vec) {
+/**
+ * @brief Move items in a vector back one index
+ * 
+ * @param vec the vector
+ */
+template <typename T> void moveVecBack(std::vector<T> &vec) {
     int numPts = vec.size();
     for(int i{1}; i < numPts; i++) {
         vec.at(i - 1) = vec.at(i);
@@ -234,14 +233,14 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
 
             twist.angular.x = 0;
             twist.angular.y = 0;
-            twist.angular.z = twist.linear.x / (2.9 / 2);
+            twist.angular.z = twist.linear.x / (distanceBetweenRows / 2);
 
             velPub.publish(twist);
             lastMotionUpdate = currentTime;
         } else if(!(lines.lines.size() == 0)) {
 
             // Use a moving average filter for the Y-intercept of the tracking line for de-noising
-            moveDoubleVecBack(lineTrackerFilter);
+            moveVecBack<double>(lineTrackerFilter);
             lineTrackerFilter.at(lineTrackerFilter.size() - 1) = getYInt(lines.lines.at(2));
 
             double yIntAve {0};
@@ -292,8 +291,6 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
 lineGroup ransac(const PointCloud::ConstPtr &pcl) {
     double inlierThreshold {0.39};
     int numLoops {250};
-    int minInlierThreshold {50};
-    double distanceBetweenLines {2.9};
 
     lineGroup bestLineGroup;
     bestLineGroup.totalInliers = 0;
@@ -332,7 +329,7 @@ lineGroup ransac(const PointCloud::ConstPtr &pcl) {
         currentLine.distance = lineToPtDistance(x, y, currentLine.a, currentLine.b, currentLine.c);
 
         // Construct a contestant line group from the original line
-        if(getYInt(currentLine) < 0 && getYInt(currentLine) > -distanceBetweenLines) {
+        if(getYInt(currentLine) < 0 && getYInt(currentLine) > -distanceBetweenRows) {
             lineGroup currentLineGroup;
             currentLineGroup.lines.push_back(currentLine);
             currentLineGroup.totalInliers = currentLine.inliers;
@@ -341,7 +338,7 @@ lineGroup ransac(const PointCloud::ConstPtr &pcl) {
             line rightLine;
             rightLine.a = currentLine.a;
             rightLine.b = currentLine.b;
-            rightLine.c = -(distanceBetweenLines * currentLine.b) + currentLine.c;
+            rightLine.c = -(distanceBetweenRows * currentLine.b) + currentLine.c;
 
             rightLine.inliers = 0;
             for(int j{0}; j < pcl->width; j++) {
@@ -424,8 +421,6 @@ int main(int argc, char **argv) {
         return -1;  // by convention, return a non-zero code to indicate error
     }
 
-    std::cout << std::boolalpha;
-
     ros::NodeHandle n;
 
     endOfRowCounter = 0;
@@ -450,4 +445,3 @@ int main(int argc, char **argv) {
 
     return 0;
 }
-
