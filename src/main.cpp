@@ -2,6 +2,7 @@
 #include <iostream>
 #include <cstdlib>
 #include <ctime>
+#include <cmath>
 #include "ros/ros.h"
 #include "nav_msgs/Odometry.h"
 #include "rosgraph_msgs/Clock.h"
@@ -19,10 +20,17 @@
 #include "opencv2/imgcodecs.hpp"
 #include <png++/png.hpp>
 
+// USER PARAMETERS
+constexpr double distanceBetweenRows = 2.9;
+constexpr double inlierThreshold = 0.39;
+constexpr unsigned numRansacLoops = 250;
+constexpr double turningSpeed = 0.4;
+constexpr double drivingSpeed = 0.2;
+
 typedef pcl::PointCloud<pcl::PointXYZ> PointCloud;
 
 struct line {
-    double a, b, c, distance;
+    double a, b, c, distance, theta;
     unsigned inliers;
 };
 
@@ -39,7 +47,8 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl);
 void displayLine(line line, float r, float g, float b, int id);
 lineGroup ransac(const PointCloud::ConstPtr &pcl);
 bool close(line line1, line line2);
-double lineToPtDistance(double x, double y, double a, double b, double c);
+double lineToPtDistance(double x, double y, line l);
+double lineToPtAngle(double x, double y, line l);
 double getSlope(line line);
 double getYInt(line line);
 void printPointCloud(const PointCloud::ConstPtr &pcl);
@@ -51,9 +60,7 @@ PID controller;
 int endOfRowCounter;
 int startOfRowCounter;
 bool turning;
-
-// USER PARAMETERS
-constexpr double distanceBetweenRows = 2.9;
+std::ofstream testing1;
 
 //Storing the past number of valid points for a moving average
 std::vector<int> numAheadPtsVec(49, -1);
@@ -69,10 +76,10 @@ void clockCallback(const rosgraph_msgs::Clock::ConstPtr &msg) {
 }
 
 /**
- * @brief Whether the point is a point belonging to a wall
+ * @brief Whether the point is a point not belonging to a wall
  * 
  * @param pt the point in the point cloud, containing an X, Y, and Z
- * @return a boolean representing whether the point is on a wall
+ * @return a boolean representing whether the point is not on a wall
  */
 bool isGroundPoint(const pcl::PointXYZ &pt) {
     return (pt.z > -0.375 && pt.z < -0.365);
@@ -183,6 +190,60 @@ double getYInt(line line) {
 }
 
 /**
+ * @brief Determine if two lines are too close to be different lines
+ * 
+ * @param line1 the first line
+ * @param line2 the second line
+ * 
+ * @return whether the two lines represent the same detected line
+ */
+bool close(line line1, line line2) {
+    if(std::abs(-(line1.a/line1.b) - (-(line2.a/line2.b))) < 0.2) {
+        return (std::abs((line1.c/line1.b) - (line2.c/line2.b)) < 1.0);
+    }
+    return false;
+}
+
+/**
+ * @brief Determine the distance from a point to a line in standard form
+ * 
+ * @param x the x of the point
+ * @param y the y of the point
+ * @param line the line
+ * 
+ * @return the distance from the point to the line in standard form
+ */
+double lineToPtDistance(double x, double y, line l) {
+    return (std::abs((l.a * x) + (l.b * y) + l.c) / (std::sqrt(l.a*l.a + l.b*l.b)));
+}
+
+/**
+ * @brief Determine the angle from a point to a line
+ * 
+ * @param x the x of the point
+ * @param y the y of the point
+ * @param line the line
+ * 
+ * @return the angle from the point to the line (parallel means 90)
+ */
+double lineToPtAngle(double x, double y, line l) {
+    return M_PI_2 + std::atan(getSlope(l));
+}
+
+/**
+ * @brief Print the contents of a point cloud for testing
+ * 
+ * @param pcl the point cloud to print
+ */
+void printPointCloud(const PointCloud::ConstPtr &pcl) {
+    for(int i{0}; i < pcl->width; i++) {
+        if(!isGroundPoint(pcl->points.at(i))) {
+            std::cout << "X: " << pcl->points.at(i).x << " Y: " << pcl->points.at(i).y << " Z: " << pcl->points.at(i).z << std::endl;
+        }
+    }
+}
+
+/**
  * @brief Update the output to the robot using Lidar data, through a PID controller
  * 
  * @param pcl the message received from the Lidar ros topic (velodyne)
@@ -191,9 +252,15 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
     if(currentTime - lastMotionUpdate > 10) {
         // Collect the detected lines from the RANSAC algorithm
         lineGroup lines {ransac(pcl)};
+        std::cout << "Distance: " << lines.lines.at(0).distance << " Angle: " << lines.lines.at(0).theta << std::endl;
+        std::cout << "X: " << x << " Y: " << y << " T: " << yaw << std::endl;
+        std::cout << "Slope: " << getSlope(lines.lines.at(0)) << " Yint: " << getYInt(lines.lines.at(0)) << std::endl;
+        std::cout << "-------------------" << std::endl;
 
         // DETERMINE TURNING OR DRIVING
         //***********************************************//
+
+        testing1 << x << "," << y << "," << yaw << "," << lines.lines.at(0).distance << "," << lines.lines.at(0).theta << "\n";
 
         // Determine the ratio of points ahead of the robot
         int numValidPts {0};
@@ -204,7 +271,6 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
                 if(pcl->points.at(i).x > 0) numAheadPts++;
             }
         }
-        std::cout << "Ahead/Valid: " << static_cast<int>((static_cast<double>(numAheadPts)/numValidPts) * 100) << "%" << std::endl;
         double aheadRatio {static_cast<double>(numAheadPts) / numValidPts};
 
         // Decide if we should switch modes
@@ -227,7 +293,7 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
             // Construct a velocity message to give to the Husky based on basic constant angular velocity turning
             geometry_msgs::Twist twist;
 
-            twist.linear.x = 0.4;
+            twist.linear.x = turningSpeed;
             twist.linear.y = 0;
             twist.linear.z = 0;
 
@@ -238,7 +304,6 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
             velPub.publish(twist);
             lastMotionUpdate = currentTime;
         } else if(!(lines.lines.size() == 0)) {
-
             // Use a moving average filter for the Y-intercept of the tracking line for de-noising
             moveVecBack<double>(lineTrackerFilter);
             lineTrackerFilter.at(lineTrackerFilter.size() - 1) = getYInt(lines.lines.at(2));
@@ -248,16 +313,9 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
                 for(auto val : lineTrackerFilter) yIntAve += val;
                 yIntAve /= lineTrackerFilter.size();
             }
-            int numLines {lines.lines.size()};
 
-            // Display the originally detected line in green
-            // displayLine(lines.lines.at(0), 0, 1, 0, 0);
-
-            // Display the complementary parallel line in red
-            // displayLine(lines.lines.at(1), 1, 0, 0, 1);
-
-            // Display the tracking line in blue
-            displayLine(lines.lines.at(2), 0, 0, 1, 2);
+            // Display the originally detected line in blue
+            displayLine(lines.lines.at(0), 0, 0, 1, 2);
 
             //Run the PID controller
             double angVel {controller.calculate(yIntAve, currentTime)};
@@ -265,7 +323,7 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
             //Construct a velocity message to give to the Husky
             geometry_msgs::Twist twist;
 
-            twist.linear.x = 0.2;
+            twist.linear.x = drivingSpeed;
             twist.linear.y = 0;
             twist.linear.z = 0;
 
@@ -273,7 +331,7 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
             twist.angular.y = 0;
             twist.angular.z = angVel;
 
-            velPub.publish(twist);
+            //velPub.publish(twist);
             lastMotionUpdate = currentTime;
         } else {
             std::cout << "Size " << lines.lines.size() << " Inliers " << lines.totalInliers << std::endl;
@@ -289,9 +347,6 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
  * @return the group of lines that the line detection yielded
  */
 lineGroup ransac(const PointCloud::ConstPtr &pcl) {
-    double inlierThreshold {0.39};
-    int numLoops {250};
-
     lineGroup bestLineGroup;
     bestLineGroup.totalInliers = 0;
 
@@ -299,7 +354,7 @@ lineGroup ransac(const PointCloud::ConstPtr &pcl) {
     placeholder.inliers = 0;
     bestLineGroup.lines.push_back(placeholder);
 
-    for(int i{0}; i < numLoops; i++) {
+    for(int i{0}; i < numRansacLoops; i++) {
         // Find two random points for RANSAC line detection
         int pt1Idx {std::rand() / ((RAND_MAX) / (pcl->width - 1))};
         while(isGroundPoint(pcl->points.at(pt1Idx))) {
@@ -314,22 +369,23 @@ lineGroup ransac(const PointCloud::ConstPtr &pcl) {
         line currentLine;
         currentLine.a = pcl->points.at(pt2Idx).y - pcl->points.at(pt1Idx).y;
         currentLine.b = pcl->points.at(pt1Idx).x - pcl->points.at(pt2Idx).x;
-        currentLine.c = (currentLine.a * pcl->points.at(pt1Idx).x) + (currentLine.b * pcl->points.at(pt1Idx).y);
+        currentLine.c = -((currentLine.a * pcl->points.at(pt1Idx).x) + (currentLine.b * pcl->points.at(pt1Idx).y));
 
         // Determine the number of inliers in the originally detected line
         currentLine.inliers = 0;
         for(int j{0}; j < pcl->width; j++) {
             if(!isGroundPoint(pcl->points.at(j))) {
-                double distance {lineToPtDistance(pcl->points.at(j).x, pcl->points.at(j).y, currentLine.a, currentLine.b, currentLine.c)};
+                double distance {lineToPtDistance(pcl->points.at(j).x, pcl->points.at(j).y, currentLine)};
                 if(std::abs(distance) <= inlierThreshold) currentLine.inliers++;
             }
         }
 
         // Determine the current distance to the line
-        currentLine.distance = lineToPtDistance(x, y, currentLine.a, currentLine.b, currentLine.c);
+        currentLine.distance = lineToPtDistance(0, 0, currentLine);
+        currentLine.theta = lineToPtAngle(0, 0, currentLine);
 
-        // Construct a contestant line group from the original line
-        if(getYInt(currentLine) < 0 && getYInt(currentLine) > -distanceBetweenRows) {
+        if(getYInt(currentLine) > 0) {
+            // Construct a contestant line group from the original line
             lineGroup currentLineGroup;
             currentLineGroup.lines.push_back(currentLine);
             currentLineGroup.totalInliers = currentLine.inliers;
@@ -343,16 +399,17 @@ lineGroup ransac(const PointCloud::ConstPtr &pcl) {
             rightLine.inliers = 0;
             for(int j{0}; j < pcl->width; j++) {
                 if(!isGroundPoint(pcl->points.at(j))) {
-                    double distance {lineToPtDistance(pcl->points.at(j).x, pcl->points.at(j).y, rightLine.a, rightLine.b, rightLine.c)};
+                    double distance {lineToPtDistance(pcl->points.at(j).x, pcl->points.at(j).y, rightLine)};
                     if(std::abs(distance) <= inlierThreshold) rightLine.inliers++;
                 }
             }
 
             // Determine the current distance to the line
-            rightLine.distance = lineToPtDistance(x, y, rightLine.a, rightLine.b, rightLine.c);
+            rightLine.distance = lineToPtDistance(0, 0, rightLine);
+            rightLine.theta = lineToPtAngle(0, 0, rightLine);
 
             currentLineGroup.lines.push_back(rightLine);
-            currentLineGroup.totalInliers += rightLine.inliers;
+            //currentLineGroup.totalInliers += rightLine.inliers;
 
             // Determine if this is the best line group
             if(currentLineGroup.totalInliers >= bestLineGroup.totalInliers) bestLineGroup = currentLineGroup;
@@ -364,53 +421,11 @@ lineGroup ransac(const PointCloud::ConstPtr &pcl) {
     tracker.a = bestLineGroup.lines.at(0).a;
     tracker.b = bestLineGroup.lines.at(0).b;
     tracker.c = (bestLineGroup.lines.at(0).c + bestLineGroup.lines.at(1).c) / 2;
-    tracker.distance = lineToPtDistance(x, y, tracker.a, tracker.b, tracker.c);
+    tracker.distance = lineToPtDistance(0, 0, tracker);
+    tracker.theta = lineToPtAngle(0, 0, tracker);
 
     bestLineGroup.lines.push_back(tracker);
     return bestLineGroup;
-}
-
-/**
- * @brief Determine if two lines are too close to be different lines
- * 
- * @param line1 the first line
- * @param line2 the second line
- * 
- * @return whether the two lines represent the same detected line
- */
-bool close(line line1, line line2) {
-    if(std::abs(-(line1.a/line1.b) - (-(line2.a/line2.b))) < 0.2) {
-        return (std::abs((line1.c/line1.b) - (line2.c/line2.b)) < 1.0);
-    }
-    return false;
-}
-
-/**
- * @brief Determine the distance from a point to a line in standard form
- * 
- * @param x the x of the point
- * @param y the y of the point
- * @param a the a of the line
- * @param b the b of the line
- * @param c the c of the line
- * 
- * @return the distance from the point to the line in standard form
- */
-double lineToPtDistance(double x, double y, double a, double b, double c) {
-    return (std::abs((a * x) + (b * y) - c) / (std::sqrt(a*a + b*b)));
-}
-
-/**
- * @brief Print the contents of a point cloud for testing
- * 
- * @param pcl the point cloud to print
- */
-void printPointCloud(const PointCloud::ConstPtr &pcl) {
-    for(int i{0}; i < pcl->width; i++) {
-        if(!isGroundPoint(pcl->points.at(i))) {
-            std::cout << "X: " << pcl->points.at(i).x << " Y: " << pcl->points.at(i).y << " Z: " << pcl->points.at(i).z << std::endl;
-        }
-    }
 }
 
 int main(int argc, char **argv) {
@@ -425,6 +440,8 @@ int main(int argc, char **argv) {
 
     endOfRowCounter = 0;
     startOfRowCounter = 0;
+
+    testing1 = std::ofstream("testing1.csv");
 
     std::srand(std::time(nullptr));
 
@@ -442,6 +459,8 @@ int main(int argc, char **argv) {
     controller.setMaxIOutput(0.2);
 
     ros::spin();
+
+    testing1.close();
 
     return 0;
 }
