@@ -15,6 +15,8 @@
 #include <tf/transform_datatypes.h>
 #include "pid.h"
 #include "pid.cpp"
+#include "kalman.h"
+#include "kalman.cpp"
 #include <opencv2/core/mat.hpp>
 #include "opencv2/imgproc.hpp"
 #include "opencv2/highgui.hpp"
@@ -64,6 +66,7 @@ template <typename T> void moveVecBack(std::vector<T> &vec);
 double currentTime, yaw, x, y, lastMotionUpdate;
 ros::Publisher velPub, markerPub;
 PID controller;
+Kalman filter;
 int endOfRowCounter;
 int startOfRowCounter;
 bool turning;
@@ -491,6 +494,23 @@ int main(int argc, char **argv) {
     velPub = n.advertise<geometry_msgs::Twist>("/cmd_vel", 1);
     markerPub = n.advertise<visualization_msgs::Marker>("/visualization_marker", 1);
 
+    //Kalman Filter Setup
+    Eigen::Matrix2d initialCovariance, modelError, measurementError;
+    initialCovariance << 0.3, 0,
+                         0, 0.3;
+    modelError << 0.0080626595, 0,
+                  0, 0.0653916795;
+    measurementError << 0.35, 0,
+                        0, 0.2;
+
+    Eigen::MatrixXd initialState(2,1);
+    initialState << 1.5,
+                    1.5708;
+
+    filter = Kalman(0, 0, 0, initialState, initialCovariance, modelError, measurementError);
+
+
+    //PID Controller setup
     controller = PID(std::atof(argv[1]), std::atof(argv[2]), std::atof(argv[3]));
 
     controller.setInverted(true);
