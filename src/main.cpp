@@ -7,6 +7,7 @@
 #include "nav_msgs/Odometry.h"
 #include "rosgraph_msgs/Clock.h"
 #include "geometry_msgs/Twist.h"
+#include "gazebo_msgs/ModelStates.h"
 #include "visualization_msgs/Marker.h"
 #include <pcl_ros/point_cloud.h>
 #include <pcl/conversions.h>
@@ -21,7 +22,7 @@
 #include <png++/png.hpp>
 
 // USER PARAMETERS
-constexpr double distanceBetweenRows = 2.9;
+constexpr double distanceBetweenRows = 3.0;
 constexpr double inlierThreshold = 0.39;
 constexpr unsigned numRansacLoops = 250;
 constexpr double turningSpeed = 0.4;
@@ -38,6 +39,12 @@ struct lineGroup {
     std::vector<line> lines;
     int totalInliers;
 };
+
+//For the world two_walls_3m.world, true lines are below:
+line left;
+line middle;
+line right;
+
 
 // Function Prototypes
 void clockCallback(const rosgraph_msgs::Clock::ConstPtr &msg);
@@ -91,14 +98,31 @@ bool isGroundPoint(const pcl::PointXYZ &pt) {
  * @param msg the message received from the odometry ros topic
  */
 void odomCallback(const nav_msgs::Odometry::ConstPtr &msg) {
-    x = msg->pose.pose.position.x;
-    y = msg->pose.pose.position.y;
+    // x = msg->pose.pose.position.x;
+    // y = msg->pose.pose.position.y;
 
+    // tf::Quaternion quat;
+    // quat.setW(msg->pose.pose.orientation.w);
+    // quat.setX(msg->pose.pose.orientation.x);
+    // quat.setY(msg->pose.pose.orientation.y);
+    // quat.setZ(msg->pose.pose.orientation.z);
+
+    // yaw = tf::getYaw(quat);
+}
+
+void modelStateCallback(const gazebo_msgs::ModelStates::ConstPtr &msg) {
+    unsigned idx {0};
+    for(int i{0}; i < msg->name.size(); i++) {
+        if(msg->name.at(i) == "/") idx = i;
+    }
+    x = {msg->pose.at(idx).position.x};
+    y = {msg->pose.at(idx).position.y};
+    
     tf::Quaternion quat;
-    quat.setW(msg->pose.pose.orientation.w);
-    quat.setX(msg->pose.pose.orientation.x);
-    quat.setY(msg->pose.pose.orientation.y);
-    quat.setZ(msg->pose.pose.orientation.z);
+    quat.setW(msg->pose.at(idx).orientation.w);
+    quat.setX(msg->pose.at(idx).orientation.x);
+    quat.setY(msg->pose.at(idx).orientation.y);
+    quat.setZ(msg->pose.at(idx).orientation.z);
 
     yaw = tf::getYaw(quat);
 }
@@ -139,7 +163,7 @@ void displayLine(line line, float r, float g, float b, int id) {
     // Calculate two points from which to build the line
     geometry_msgs::Point pt1;
     pt1.x = -100;
-    pt1.y = ((-(line.a / line.b)) * pt1.x) + (line.c / line.b);
+    pt1.y = ((-(line.a / line.b)) * pt1.x) - (line.c / line.b);
     pt1.z = 0;
 
     pt1.x += x;
@@ -147,7 +171,7 @@ void displayLine(line line, float r, float g, float b, int id) {
 
     geometry_msgs::Point pt2;
     pt2.x = 100;
-    pt2.y = ((-(line.a / line.b)) * pt2.x) + (line.c / line.b);
+    pt2.y = ((-(line.a / line.b)) * pt2.x) - (line.c / line.b);
     pt2.z = 0;
 
     pt2.x += x;
@@ -252,9 +276,11 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
     if(currentTime - lastMotionUpdate > 10) {
         // Collect the detected lines from the RANSAC algorithm
         lineGroup lines {ransac(pcl)};
+
+        // Output variables for Kalman testing
+        std::cout << "True Distance: " << lineToPtDistance(x, y, middle) << " True Angle: " << M_PI_2 - yaw << std::endl;
         std::cout << "Distance: " << lines.lines.at(0).distance << " Angle: " << lines.lines.at(0).theta << std::endl;
         std::cout << "X: " << x << " Y: " << y << " T: " << yaw << std::endl;
-        std::cout << "Slope: " << getSlope(lines.lines.at(0)) << " Yint: " << getYInt(lines.lines.at(0)) << std::endl;
         std::cout << "-------------------" << std::endl;
 
         // DETERMINE TURNING OR DRIVING
@@ -438,6 +464,19 @@ int main(int argc, char **argv) {
 
     ros::NodeHandle n;
 
+    //Initialize true state walls based on known positions in the simulator
+    left.a = 0;
+    left.b = 1;
+    left.c = -4.5;
+
+    middle.a = 0;
+    middle.b = 1;
+    middle.c = -1.5;
+
+    right.a = 0;
+    right.b = 1;
+    right.c = 1.5;
+
     endOfRowCounter = 0;
     startOfRowCounter = 0;
 
@@ -445,9 +484,10 @@ int main(int argc, char **argv) {
 
     std::srand(std::time(nullptr));
 
-    ros::Subscriber subOdom = n.subscribe<nav_msgs::Odometry>("/odometry/filtered", 1000, odomCallback);
-    ros::Subscriber subClock = n.subscribe<rosgraph_msgs::Clock>("/clock", 1000, clockCallback);
-    ros::Subscriber subVelodyne = n.subscribe<PointCloud>("/velodyne_points", 1000, velodyneCallBack);
+    ros::Subscriber subOdom = n.subscribe<nav_msgs::Odometry>("/odometry/filtered", 50, odomCallback);
+    ros::Subscriber subModelStates = n.subscribe<gazebo_msgs::ModelStates>("/gazebo/model_states", 50, modelStateCallback);
+    ros::Subscriber subClock = n.subscribe<rosgraph_msgs::Clock>("/clock", 50, clockCallback);
+    ros::Subscriber subVelodyne = n.subscribe<PointCloud>("/velodyne_points", 50, velodyneCallBack);
     velPub = n.advertise<geometry_msgs::Twist>("/cmd_vel", 1);
     markerPub = n.advertise<visualization_msgs::Marker>("/visualization_marker", 1);
 
