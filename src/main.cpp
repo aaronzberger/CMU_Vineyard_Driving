@@ -70,7 +70,8 @@ Kalman filter;
 int endOfRowCounter;
 int startOfRowCounter;
 bool turning;
-std::ofstream testing1;
+std::ofstream kalmanGraphing;
+int counter;
 
 //Storing the past number of valid points for a moving average
 std::vector<int> numAheadPtsVec(49, -1);
@@ -281,15 +282,26 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
         lineGroup lines {ransac(pcl)};
 
         // Output variables for Kalman testing
-        std::cout << "True Distance: " << lineToPtDistance(x, y, middle) << " True Angle: " << M_PI_2 - yaw << std::endl;
-        std::cout << "Distance: " << lines.lines.at(0).distance << " Angle: " << lines.lines.at(0).theta << std::endl;
-        std::cout << "X: " << x << " Y: " << y << " T: " << yaw << std::endl;
         std::cout << "-------------------" << std::endl;
+        std::cout << "True Distance: " << lineToPtDistance(x, y, middle) << " Angle: " << M_PI_2 - yaw << std::endl;
+        std::cout << "Detected Distance: " << lines.lines.at(0).distance << " Angle: " << lines.lines.at(0).theta << std::endl;
 
+        //Kalman filter
+        Eigen::MatrixXd detectedState(2,1);
+        detectedState << lines.lines.at(0).distance, lines.lines.at(0).theta;
+        
+        Eigen::MatrixXd outputState(2,1);
+        outputState = filter.filter(x, y, yaw, detectedState);
+
+        std::cout << "Kalman Distance: " << outputState(0,0) << " Angle: " << outputState(1,0) << std::endl;
+
+        kalmanGraphing << counter << "," << lines.lines.at(0).distance << "," << lines.lines.at(0).theta << "," <<
+                          outputState(0,0) << "," << outputState(1,0) << "," <<
+                          lineToPtDistance(x, y, middle) << "," << M_PI_2 - yaw << "\n";
+        counter++;
         // DETERMINE TURNING OR DRIVING
         //***********************************************//
 
-        testing1 << x << "," << y << "," << yaw << "," << lines.lines.at(0).distance << "," << lines.lines.at(0).theta << "\n";
 
         // Determine the ratio of points ahead of the robot
         int numValidPts {0};
@@ -483,7 +495,9 @@ int main(int argc, char **argv) {
     endOfRowCounter = 0;
     startOfRowCounter = 0;
 
-    testing1 = std::ofstream("testing1.csv");
+    counter = 0;
+
+    kalmanGraphing = std::ofstream("kalmanGraphing.csv");
 
     std::srand(std::time(nullptr));
 
@@ -498,13 +512,15 @@ int main(int argc, char **argv) {
     Eigen::Matrix2d initialCovariance, modelError, measurementError;
     initialCovariance << 0.3, 0,
                          0, 0.3;
-    modelError << 0.0080626595, 0,
-                  0, 0.0653916795;
-    measurementError << 0.35, 0,
-                        0, 0.2;
+    // modelError << 0.0080626595, 0,
+    //               0, 0.0653916795;
+    modelError << 0.005, 0,
+                  0, 0.002;
+    measurementError << 0.3, 0,
+                        0, 0.175;
 
     Eigen::MatrixXd initialState(2,1);
-    initialState << 1.5,
+    initialState << 1.4,
                     1.5708;
 
     filter = Kalman(0, 0, 0, initialState, initialCovariance, modelError, measurementError);
@@ -520,7 +536,7 @@ int main(int argc, char **argv) {
 
     ros::spin();
 
-    testing1.close();
+    kalmanGraphing.close();
 
     return 0;
 }

@@ -6,6 +6,7 @@
 
 class Kalman {
 public:
+    Kalman() : Kalman(0, 0, 0, Eigen::MatrixXd::Identity(2,1)) {};
     Kalman(double x, double y, double theta, Eigen::MatrixXd initialState,
            Eigen::Matrix2d covInitial = Eigen::Matrix2d::Identity(), Eigen::Matrix2d modelError = Eigen::Matrix2d::Zero(), 
            Eigen::Matrix2d measurementError = Eigen::Matrix2d::Zero(), Eigen::Matrix2d observationTransform = Eigen::Matrix2d::Identity());
