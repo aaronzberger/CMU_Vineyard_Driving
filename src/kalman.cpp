@@ -20,11 +20,11 @@ Kalman::Kalman(double x, double y, double theta, Eigen::MatrixXd initialState,
 Eigen::MatrixXd Kalman::filter(double x, double y, double theta, Eigen::MatrixXd detectedState) {
     double deltaX {lastRobotX - x};
     double deltaY {lastRobotY - y};
-    double deltaTheta {lastRobotTheta - theta};
+    double deltaTheta {-lastRobotTheta + theta};
 
     //State Extrapolation
-    statePrediction(0,0) = stateUpdated(0,0) + (deltaX * std::cos(stateUpdated(1,0))) - (deltaY * std::sin(stateUpdated(1,0)));
-    statePrediction(1,0) = stateUpdated(1,0) + deltaTheta;
+    statePrediction(0,0) = stateUpdated(0,0) - ((deltaX * std::cos(stateUpdated(1,0))) + (deltaY * std::sin(stateUpdated(1,0))));
+    statePrediction(1,0) = stateUpdated(1,0) - deltaTheta;
 
     //Covariance Extrapolation
     Eigen::Matrix2d jacobian;

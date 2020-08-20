@@ -13,6 +13,7 @@ public:
     Eigen::MatrixXd filter(double x, double y, double theta, Eigen::MatrixXd detectedState);
     void setModelError(Eigen::Matrix2d modelError) {this->modelError = modelError;};
     void setMeasurementError(Eigen::Matrix2d measurementError) {this->measurementError = measurementError;};
+    void setInitialOdom(double x, double y, double theta) {lastRobotX = x; lastRobotY = y; lastRobotTheta = theta;};
     
 private:
     Eigen::Matrix2d covPrediction, covUpdated, kGain;

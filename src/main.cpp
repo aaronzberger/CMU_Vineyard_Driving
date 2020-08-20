@@ -64,6 +64,7 @@ void printPointCloud(const PointCloud::ConstPtr &pcl);
 template <typename T> void moveVecBack(std::vector<T> &vec);
 
 double currentTime, yaw, x, y, lastMotionUpdate;
+double trueX, trueY, trueYaw;
 ros::Publisher velPub, markerPub;
 PID controller;
 Kalman filter;
@@ -72,6 +73,7 @@ int startOfRowCounter;
 bool turning;
 std::ofstream kalmanGraphing;
 int counter;
+bool firstLoop;
 
 //Storing the past number of valid points for a moving average
 std::vector<int> numAheadPtsVec(49, -1);
@@ -102,16 +104,16 @@ bool isGroundPoint(const pcl::PointXYZ &pt) {
  * @param msg the message received from the odometry ros topic
  */
 void odomCallback(const nav_msgs::Odometry::ConstPtr &msg) {
-    // x = msg->pose.pose.position.x;
-    // y = msg->pose.pose.position.y;
+    x = msg->pose.pose.position.x;
+    y = msg->pose.pose.position.y;
 
-    // tf::Quaternion quat;
-    // quat.setW(msg->pose.pose.orientation.w);
-    // quat.setX(msg->pose.pose.orientation.x);
-    // quat.setY(msg->pose.pose.orientation.y);
-    // quat.setZ(msg->pose.pose.orientation.z);
+    tf::Quaternion quat;
+    quat.setW(msg->pose.pose.orientation.w);
+    quat.setX(msg->pose.pose.orientation.x);
+    quat.setY(msg->pose.pose.orientation.y);
+    quat.setZ(msg->pose.pose.orientation.z);
 
-    // yaw = tf::getYaw(quat);
+    yaw = tf::getYaw(quat);
 }
 
 void modelStateCallback(const gazebo_msgs::ModelStates::ConstPtr &msg) {
@@ -119,8 +121,8 @@ void modelStateCallback(const gazebo_msgs::ModelStates::ConstPtr &msg) {
     for(int i{0}; i < msg->name.size(); i++) {
         if(msg->name.at(i) == "/") idx = i;
     }
-    x = {msg->pose.at(idx).position.x};
-    y = {msg->pose.at(idx).position.y};
+    trueX = {msg->pose.at(idx).position.x};
+    trueY = {msg->pose.at(idx).position.y};
     
     tf::Quaternion quat;
     quat.setW(msg->pose.at(idx).orientation.w);
@@ -128,7 +130,7 @@ void modelStateCallback(const gazebo_msgs::ModelStates::ConstPtr &msg) {
     quat.setY(msg->pose.at(idx).orientation.y);
     quat.setZ(msg->pose.at(idx).orientation.z);
 
-    yaw = tf::getYaw(quat);
+    trueYaw = tf::getYaw(quat);
 }
 
 /**
@@ -297,7 +299,7 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
 
         kalmanGraphing << counter << "," << lines.lines.at(0).distance << "," << lines.lines.at(0).theta << "," <<
                           outputState(0,0) << "," << outputState(1,0) << "," <<
-                          lineToPtDistance(x, y, middle) << "," << M_PI_2 - yaw << "\n";
+                          lineToPtDistance(trueX, trueY, middle) - 0.1 << "," << M_PI_2 - trueYaw << "\n";
         counter++;
         // DETERMINE TURNING OR DRIVING
         //***********************************************//
@@ -496,6 +498,7 @@ int main(int argc, char **argv) {
     startOfRowCounter = 0;
 
     counter = 0;
+    firstLoop = false;
 
     kalmanGraphing = std::ofstream("kalmanGraphing.csv");
 
@@ -514,9 +517,9 @@ int main(int argc, char **argv) {
                          0, 0.3;
     // modelError << 0.0080626595, 0,
     //               0, 0.0653916795;
-    modelError << 0.005, 0,
-                  0, 0.002;
-    measurementError << 0.3, 0,
+    modelError << 0.000, 0,
+                  0, 0.00;
+    measurementError << 0.1, 0,
                         0, 0.175;
 
     Eigen::MatrixXd initialState(2,1);
