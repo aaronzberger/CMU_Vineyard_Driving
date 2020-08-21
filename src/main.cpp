@@ -17,11 +17,8 @@
 #include "pid.cpp"
 #include "kalman.h"
 #include "kalman.cpp"
-#include <opencv2/core/mat.hpp>
-#include "opencv2/imgproc.hpp"
-#include "opencv2/highgui.hpp"
-#include "opencv2/imgcodecs.hpp"
 #include <png++/png.hpp>
+#include <Eigen/Dense>
 
 // USER PARAMETERS
 constexpr double distanceBetweenRows = 3.0;
@@ -42,26 +39,23 @@ struct lineGroup {
     int totalInliers;
 };
 
-//For the world two_walls_3m.world, true lines are below:
-line left;
-line middle;
-line right;
-
+//For the world two_walls_3m.world, true line is below:
+line groundTruthLine;
 
 // Function Prototypes
 void clockCallback(const rosgraph_msgs::Clock::ConstPtr &msg);
 bool isGroundPoint(const pcl::PointXYZ &pt);
 void odomCallback(const nav_msgs::Odometry::ConstPtr &msg);
 void velodyneCallBack(const PointCloud::ConstPtr &pcl);
+void modelStateCallback(const gazebo_msgs::ModelStates::ConstPtr &msg);
 void displayLine(line line, float r, float g, float b, int id);
+double getYaw(double w, double x, double y, double z);
 lineGroup ransac(const PointCloud::ConstPtr &pcl);
 bool close(line line1, line line2);
 double lineToPtDistance(double x, double y, line l);
 double lineToPtAngle(double x, double y, line l);
 double getSlope(line line);
 double getYInt(line line);
-void printPointCloud(const PointCloud::ConstPtr &pcl);
-template <typename T> void moveVecBack(std::vector<T> &vec);
 
 double currentTime, yaw, x, y, lastMotionUpdate;
 double trueX, trueY, trueYaw;
@@ -74,6 +68,7 @@ bool turning;
 std::ofstream kalmanGraphing;
 int counter;
 bool firstLoop;
+Eigen::Matrix3d Tglobal_lastFrame;
 
 //Storing the past number of valid points for a moving average
 std::vector<int> numAheadPtsVec(49, -1);
@@ -99,7 +94,27 @@ bool isGroundPoint(const pcl::PointXYZ &pt) {
 }
 
 /**
- * @brief Update the yaw variable
+ * @brief Find the yaw from a quaternion
+ * 
+ * @param w the w of the quaternion
+ * @param x the x of the quaternion
+ * @param y the y of the quaternion
+ * @param z the z of the quaternion
+ * 
+ * @return the yaw calculated
+ */
+double getYaw(double w, double x, double y, double z) {
+    tf::Quaternion quat;
+    quat.setW(w);
+    quat.setX(x);
+    quat.setY(y);
+    quat.setZ(z);
+
+    return tf::getYaw(quat);
+}
+
+/**
+ * @brief Update the x, y, and yaw global variables
  * 
  * @param msg the message received from the odometry ros topic
  */
@@ -107,15 +122,14 @@ void odomCallback(const nav_msgs::Odometry::ConstPtr &msg) {
     x = msg->pose.pose.position.x;
     y = msg->pose.pose.position.y;
 
-    tf::Quaternion quat;
-    quat.setW(msg->pose.pose.orientation.w);
-    quat.setX(msg->pose.pose.orientation.x);
-    quat.setY(msg->pose.pose.orientation.y);
-    quat.setZ(msg->pose.pose.orientation.z);
-
-    yaw = tf::getYaw(quat);
+    yaw = getYaw(msg->pose.pose.orientation.w, msg->pose.pose.orientation.x, msg->pose.pose.orientation.y, msg->pose.pose.orientation.z);
 }
 
+/**
+ * @brief Update the trueX, trueY, and trueYaw global variables
+ * 
+ * @param msg the message received from the Gazebo model states ros topic
+ */
 void modelStateCallback(const gazebo_msgs::ModelStates::ConstPtr &msg) {
     unsigned idx {0};
     for(int i{0}; i < msg->name.size(); i++) {
@@ -124,25 +138,7 @@ void modelStateCallback(const gazebo_msgs::ModelStates::ConstPtr &msg) {
     trueX = {msg->pose.at(idx).position.x};
     trueY = {msg->pose.at(idx).position.y};
     
-    tf::Quaternion quat;
-    quat.setW(msg->pose.at(idx).orientation.w);
-    quat.setX(msg->pose.at(idx).orientation.x);
-    quat.setY(msg->pose.at(idx).orientation.y);
-    quat.setZ(msg->pose.at(idx).orientation.z);
-
-    trueYaw = tf::getYaw(quat);
-}
-
-/**
- * @brief Move items in a vector back one index
- * 
- * @param vec the vector
- */
-template <typename T> void moveVecBack(std::vector<T> &vec) {
-    int numPts = vec.size();
-    for(int i{1}; i < numPts; i++) {
-        vec.at(i - 1) = vec.at(i);
-    }
+    trueYaw = getYaw(msg->pose.at(idx).orientation.w, msg->pose.at(idx).orientation.x, msg->pose.at(idx).orientation.y, msg->pose.at(idx).orientation.z);
 }
 
 /**
@@ -169,7 +165,7 @@ void displayLine(line line, float r, float g, float b, int id) {
     // Calculate two points from which to build the line
     geometry_msgs::Point pt1;
     pt1.x = -100;
-    pt1.y = ((-(line.a / line.b)) * pt1.x) - (line.c / line.b);
+    pt1.y = (getSlope(line) * pt1.x) + getYInt(line);
     pt1.z = 0;
 
     pt1.x += x;
@@ -177,7 +173,7 @@ void displayLine(line line, float r, float g, float b, int id) {
 
     geometry_msgs::Point pt2;
     pt2.x = 100;
-    pt2.y = ((-(line.a / line.b)) * pt2.x) - (line.c / line.b);
+    pt2.y = (getSlope(line) * pt2.x) + getYInt(line);
     pt2.z = 0;
 
     pt2.x += x;
@@ -261,50 +257,49 @@ double lineToPtAngle(double x, double y, line l) {
 }
 
 /**
- * @brief Print the contents of a point cloud for testing
- * 
- * @param pcl the point cloud to print
- */
-void printPointCloud(const PointCloud::ConstPtr &pcl) {
-    for(int i{0}; i < pcl->width; i++) {
-        if(!isGroundPoint(pcl->points.at(i))) {
-            std::cout << "X: " << pcl->points.at(i).x << " Y: " << pcl->points.at(i).y << " Z: " << pcl->points.at(i).z << std::endl;
-        }
-    }
-}
-
-/**
  * @brief Update the output to the robot using Lidar data, through a PID controller
  * 
  * @param pcl the message received from the Lidar ros topic (velodyne)
  */
 void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
-    if(currentTime - lastMotionUpdate > 10) {
+    if(firstLoop) {
+        Tglobal_lastFrame << std::cos(-trueYaw), std::sin(-trueYaw), trueX,
+                            -std::sin(-trueYaw), std::cos(-trueYaw), trueY,
+                            0,                   0,                  1;
+        firstLoop = false;
+    }
+    else if(currentTime - lastMotionUpdate > 10) {
         // Collect the detected lines from the RANSAC algorithm
         lineGroup lines {ransac(pcl)};
 
-        // Output variables for Kalman testing
-        std::cout << "-------------------" << std::endl;
-        std::cout << "True Distance: " << lineToPtDistance(x, y, middle) << " Angle: " << M_PI_2 - yaw << std::endl;
-        std::cout << "Detected Distance: " << lines.lines.at(0).distance << " Angle: " << lines.lines.at(0).theta << std::endl;
-
-        //Kalman filter
         Eigen::MatrixXd detectedState(2,1);
         detectedState << lines.lines.at(0).distance, lines.lines.at(0).theta;
+
+        // Determine the transition model parameters for the EKF by changing the frame of reference from global to local
+        Eigen::Matrix3d Tglobal_thisFrame;
+        Tglobal_thisFrame << std::cos(-trueYaw), std::sin(-trueYaw), trueX,
+                            -std::sin(-trueYaw), std::cos(-trueYaw), trueY,
+                            0,                  0,                 1;
         
+        Eigen::Matrix3d TlastFrame_thisFrame;
+        TlastFrame_thisFrame = Tglobal_lastFrame.inverse() * Tglobal_thisFrame;
+
+        double deltaX {TlastFrame_thisFrame(0,2)};
+        double deltaY {TlastFrame_thisFrame(1,2)};
+        
+        // Pass the RANSAC output and odometry into an EKF for tracking (and smoothing)
         Eigen::MatrixXd outputState(2,1);
-        outputState = filter.filter(x, y, yaw, detectedState);
+        outputState = filter.filter(deltaX, deltaY, trueYaw, detectedState);
 
-        std::cout << "Kalman Distance: " << outputState(0,0) << " Angle: " << outputState(1,0) << std::endl;
-
+        // Print data to a csv file for graphing and testing
         kalmanGraphing << counter << "," << lines.lines.at(0).distance << "," << lines.lines.at(0).theta << "," <<
                           outputState(0,0) << "," << outputState(1,0) << "," <<
-                          lineToPtDistance(trueX, trueY, middle) - 0.1 << "," << M_PI_2 - trueYaw << "\n";
+                          lineToPtDistance(trueX, trueY, groundTruthLine) - 0.1 << "," << M_PI_2 - trueYaw << "\n";
         counter++;
-        // DETERMINE TURNING OR DRIVING
-        //***********************************************//
 
+        Tglobal_lastFrame = Tglobal_thisFrame;
 
+        // Determine whethher to turn or drive
         // Determine the ratio of points ahead of the robot
         int numValidPts {0};
         int numAheadPts {0};
@@ -330,7 +325,6 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
                 startOfRowCounter = 0;
             }
         }
-        //***********************************************//
 
         if(turning) {
             // Construct a velocity message to give to the Husky based on basic constant angular velocity turning
@@ -346,22 +340,13 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
 
             velPub.publish(twist);
             lastMotionUpdate = currentTime;
+
         } else if(!(lines.lines.size() == 0)) {
-            // Use a moving average filter for the Y-intercept of the tracking line for de-noising
-            moveVecBack<double>(lineTrackerFilter);
-            lineTrackerFilter.at(lineTrackerFilter.size() - 1) = getYInt(lines.lines.at(2));
-
-            double yIntAve {0};
-            if(!(lineTrackerFilter.at(0) == -99)) {
-                for(auto val : lineTrackerFilter) yIntAve += val;
-                yIntAve /= lineTrackerFilter.size();
-            }
-
-            // Display the originally detected line in blue
+            // Display the originally detected line on the left in blue
             displayLine(lines.lines.at(0), 0, 0, 1, 2);
 
             //Run the PID controller
-            double angVel {controller.calculate(yIntAve, currentTime)};
+            double angVel {controller.calculate(outputState(0,0), currentTime)};
 
             //Construct a velocity message to give to the Husky
             geometry_msgs::Twist twist;
@@ -374,7 +359,7 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
             twist.angular.y = 0;
             twist.angular.z = angVel;
 
-            //velPub.publish(twist);
+            velPub.publish(twist);
             lastMotionUpdate = currentTime;
         } else {
             std::cout << "Size " << lines.lines.size() << " Inliers " << lines.totalInliers << std::endl;
@@ -414,7 +399,7 @@ lineGroup ransac(const PointCloud::ConstPtr &pcl) {
         currentLine.b = pcl->points.at(pt1Idx).x - pcl->points.at(pt2Idx).x;
         currentLine.c = -((currentLine.a * pcl->points.at(pt1Idx).x) + (currentLine.b * pcl->points.at(pt1Idx).y));
 
-        // Determine the number of inliers in the originally detected line
+        // Determine the number of inliers in the line
         currentLine.inliers = 0;
         for(int j{0}; j < pcl->width; j++) {
             if(!isGroundPoint(pcl->points.at(j))) {
@@ -423,22 +408,23 @@ lineGroup ransac(const PointCloud::ConstPtr &pcl) {
             }
         }
 
-        // Determine the current distance to the line
+        // Determine the current distance and angle to the line
         currentLine.distance = lineToPtDistance(0, 0, currentLine);
         currentLine.theta = lineToPtAngle(0, 0, currentLine);
 
-        if(getYInt(currentLine) > 0) {
-            // Construct a contestant line group from the original line
+        if(getYInt(currentLine) > 0) { // We will only proceed if the detected line is to the left, for consistency
+            // Construct a line group containing the original line
             lineGroup currentLineGroup;
             currentLineGroup.lines.push_back(currentLine);
             currentLineGroup.totalInliers = currentLine.inliers;
 
-            // Construct a complementary line that is parallel to the original line and add it to the line group
+            // Construct a complementary line that is parallel to the original line and add it to the line group (this is the row to the right)
             line rightLine;
             rightLine.a = currentLine.a;
             rightLine.b = currentLine.b;
             rightLine.c = -(distanceBetweenRows * currentLine.b) + currentLine.c;
 
+            // Determine the number of inliers in the line
             rightLine.inliers = 0;
             for(int j{0}; j < pcl->width; j++) {
                 if(!isGroundPoint(pcl->points.at(j))) {
@@ -447,7 +433,7 @@ lineGroup ransac(const PointCloud::ConstPtr &pcl) {
                 }
             }
 
-            // Determine the current distance to the line
+            // Determine the current distance and angle to the line
             rightLine.distance = lineToPtDistance(0, 0, rightLine);
             rightLine.theta = lineToPtAngle(0, 0, rightLine);
 
@@ -458,16 +444,6 @@ lineGroup ransac(const PointCloud::ConstPtr &pcl) {
             if(currentLineGroup.totalInliers >= bestLineGroup.totalInliers) bestLineGroup = currentLineGroup;
         }
     }
-
-    // Construct a line in the middle of the other two lines as a tracker
-    line tracker;
-    tracker.a = bestLineGroup.lines.at(0).a;
-    tracker.b = bestLineGroup.lines.at(0).b;
-    tracker.c = (bestLineGroup.lines.at(0).c + bestLineGroup.lines.at(1).c) / 2;
-    tracker.distance = lineToPtDistance(0, 0, tracker);
-    tracker.theta = lineToPtAngle(0, 0, tracker);
-
-    bestLineGroup.lines.push_back(tracker);
     return bestLineGroup;
 }
 
@@ -476,33 +452,61 @@ int main(int argc, char **argv) {
 
     if(argc != 4) {
         std::cout << "Expected 3 arguments: P, I, D" << std::endl;
-        return -1;  // by convention, return a non-zero code to indicate error
+        return -1;
     }
 
     ros::NodeHandle n;
 
-    //Initialize true state walls based on known positions in the simulator
-    left.a = 0;
-    left.b = 1;
-    left.c = -4.5;
+    // Initialize ground truth for simulations
+    groundTruthLine.a = 0;
+    groundTruthLine.b = 1;
+    groundTruthLine.c = -1.5;
 
-    middle.a = 0;
-    middle.b = 1;
-    middle.c = -1.5;
-
-    right.a = 0;
-    right.b = 1;
-    right.c = 1.5;
-
+    // For storing values to determine turning or driving mode
     endOfRowCounter = 0;
     startOfRowCounter = 0;
 
+    // For printing a csv file for graphing
     counter = 0;
-    firstLoop = false;
-
     kalmanGraphing = std::ofstream("kalmanGraphing.csv");
 
+    firstLoop = true;
+
+    // Seed the STL random number generation with the current time
     std::srand(std::time(nullptr));
+
+    //Kalman Filter Setup
+    Eigen::Matrix2d initialCovariance, modelError, measurementError;
+    initialCovariance << 0.3, 0,
+                         0, 0.3;
+    modelError << 0, 0,
+                  0, 0;
+    measurementError << 0.25, 0,
+                        0, 0.25;
+
+    // Find the initial robot odometry so the EKF can be initialized properly
+    gazebo_msgs::ModelStates::ConstPtr initialOdom {ros::topic::waitForMessage<gazebo_msgs::ModelStates>("/gazebo/model_states")};
+    modelStateCallback(initialOdom);
+
+    // Perform 3 line detections and take the average measurements for an initial state prediction for the EKF
+    Eigen::MatrixXd initialState(2,1);
+    PointCloud::ConstPtr initialDetection1 {ros::topic::waitForMessage<PointCloud>("/velodyne_points")};
+    PointCloud::ConstPtr initialDetection2 {ros::topic::waitForMessage<PointCloud>("/velodyne_points")};
+    PointCloud::ConstPtr initialDetection3 {ros::topic::waitForMessage<PointCloud>("/velodyne_points")};
+
+    initialState(0,0) = {(ransac(initialDetection1).lines.at(0).distance + ransac(initialDetection2).lines.at(0).distance + ransac(initialDetection3).lines.at(0).distance) / 3};
+    initialState(1,0) = {(ransac(initialDetection1).lines.at(0).theta + ransac(initialDetection2).lines.at(0).theta + ransac(initialDetection3).lines.at(0).theta) / 3};
+
+    filter = Kalman(0, 0, trueYaw, initialState, initialCovariance, modelError, measurementError);
+
+    // PID Controller setup
+    controller = PID(std::atof(argv[1]), std::atof(argv[2]), std::atof(argv[3]));
+
+    controller.setInverted(false);
+    controller.setSetPoint(1.5);
+    controller.setOutputLimits(-0.4, 0.4);
+    controller.setMaxIOutput(0.2);
+
 
     ros::Subscriber subOdom = n.subscribe<nav_msgs::Odometry>("/odometry/filtered", 50, odomCallback);
     ros::Subscriber subModelStates = n.subscribe<gazebo_msgs::ModelStates>("/gazebo/model_states", 50, modelStateCallback);
@@ -511,35 +515,11 @@ int main(int argc, char **argv) {
     velPub = n.advertise<geometry_msgs::Twist>("/cmd_vel", 1);
     markerPub = n.advertise<visualization_msgs::Marker>("/visualization_marker", 1);
 
-    //Kalman Filter Setup
-    Eigen::Matrix2d initialCovariance, modelError, measurementError;
-    initialCovariance << 0.3, 0,
-                         0, 0.3;
-    // modelError << 0.0080626595, 0,
-    //               0, 0.0653916795;
-    modelError << 0.000, 0,
-                  0, 0.00;
-    measurementError << 0.1, 0,
-                        0, 0.175;
-
-    Eigen::MatrixXd initialState(2,1);
-    initialState << 1.4,
-                    1.5708;
-
-    filter = Kalman(0, 0, 0, initialState, initialCovariance, modelError, measurementError);
-
-
-    //PID Controller setup
-    controller = PID(std::atof(argv[1]), std::atof(argv[2]), std::atof(argv[3]));
-
-    controller.setInverted(true);
-    controller.setSetPoint(0);
-    controller.setOutputLimits(-0.4, 0.4);
-    controller.setMaxIOutput(0.2);
-
     ros::spin();
 
+    // Actions to perform at the end of the program
     kalmanGraphing.close();
+    std::cout << "End of program" << std::endl;
 
     return 0;
 }

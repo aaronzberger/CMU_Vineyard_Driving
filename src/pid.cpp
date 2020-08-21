@@ -2,6 +2,7 @@
 #include <limits>
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 
 
 /**
@@ -156,6 +157,8 @@ double PID::calculate(double sensorData, double setPoint, double time) {
     
     this->lastSensorData = sensorData;
     this->lastTime = time;
+
+    std::cout << "P: " << pOutput << " I: " << iOutput << " D: " << dOutput << std::endl;
 
     return totalOutput;
 }
