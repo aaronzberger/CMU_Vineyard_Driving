@@ -24,8 +24,23 @@
 constexpr double distanceBetweenRows = 3.0;
 constexpr double inlierThreshold = 0.39;
 constexpr unsigned numRansacLoops = 250;
+constexpr double leftRowYInt = 1.5;
+
 constexpr double turningSpeed = 0.4;
 constexpr double drivingSpeed = 0.2;
+
+constexpr unsigned numInitialStateDetections = 15;
+
+constexpr double maxPIDOutput = 0.4;
+constexpr double maxIOutput = 0.2;
+
+constexpr double initialCovarianceInput[2][2] = {{0.3, 0  },
+                                                 {0  , 0.3}};
+constexpr double initialModelErrorInput[2][2] = {{0, 0},
+                                                 {0, 0}};
+constexpr double initialMeasurementErrorInput[2][2] = {{0.25, 0   },
+                                                       {0   , 0.25}};
+
 
 typedef pcl::PointCloud<pcl::PointXYZ> PointCloud;
 
@@ -279,7 +294,7 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
         Eigen::Matrix3d Tglobal_thisFrame;
         Tglobal_thisFrame << std::cos(-trueYaw), std::sin(-trueYaw), trueX,
                             -std::sin(-trueYaw), std::cos(-trueYaw), trueY,
-                            0,                  0,                 1;
+                            0,                   0,                  1;
         
         Eigen::Matrix3d TlastFrame_thisFrame;
         TlastFrame_thisFrame = Tglobal_lastFrame.inverse() * Tglobal_thisFrame;
@@ -315,14 +330,17 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
         if(!turning) {
             if(aheadRatio < 0.2) endOfRowCounter++;
             if(endOfRowCounter > 20) {
+                // Execute if robot is driving and should now start turning
                 turning = true;
                 endOfRowCounter = 0;
             }
         } else {
             if(aheadRatio > 0.75) startOfRowCounter++;
             if(startOfRowCounter > 20) {
+                // Execute if robot is turning and should now start driving
                 turning = false;
                 startOfRowCounter = 0;
+                ros::Duration(1.0).sleep();
             }
         }
 
@@ -330,13 +348,13 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
             // Construct a velocity message to give to the Husky based on basic constant angular velocity turning
             geometry_msgs::Twist twist;
 
-            twist.linear.x = turningSpeed;
+            twist.linear.x = turningSpeed - 0.1;
             twist.linear.y = 0;
             twist.linear.z = 0;
 
             twist.angular.x = 0;
             twist.angular.y = 0;
-            twist.angular.z = twist.linear.x / (distanceBetweenRows / 2);
+            twist.angular.z = turningSpeed / (distanceBetweenRows / 2);
 
             velPub.publish(twist);
             lastMotionUpdate = currentTime;
@@ -346,7 +364,12 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
             displayLine(lines.lines.at(0), 0, 0, 1, 2);
 
             //Run the PID controller
+            std::cout << "Distance to wall: " << outputState(0,0) << std::endl;
+
             double angVel {controller.calculate(outputState(0,0), currentTime)};
+            
+            std::cout << "PID Output: " << angVel << std::endl;
+            std::cout << "---------------------------" << std::endl;
 
             //Construct a velocity message to give to the Husky
             geometry_msgs::Twist twist;
@@ -460,7 +483,7 @@ int main(int argc, char **argv) {
     // Initialize ground truth for simulations
     groundTruthLine.a = 0;
     groundTruthLine.b = 1;
-    groundTruthLine.c = -1.5;
+    groundTruthLine.c = -leftRowYInt;
 
     // For storing values to determine turning or driving mode
     endOfRowCounter = 0;
@@ -476,26 +499,24 @@ int main(int argc, char **argv) {
     std::srand(std::time(nullptr));
 
     //Kalman Filter Setup
-    Eigen::Matrix2d initialCovariance, modelError, measurementError;
-    initialCovariance << 0.3, 0,
-                         0, 0.3;
-    modelError << 0, 0,
-                  0, 0;
-    measurementError << 0.25, 0,
-                        0, 0.25;
+    Eigen::Matrix2d initialCovariance(initialCovarianceInput), modelError(initialModelErrorInput), measurementError(initialMeasurementErrorInput);
 
     // Find the initial robot odometry so the EKF can be initialized properly
     gazebo_msgs::ModelStates::ConstPtr initialOdom {ros::topic::waitForMessage<gazebo_msgs::ModelStates>("/gazebo/model_states")};
     modelStateCallback(initialOdom);
 
-    // Perform 3 line detections and take the average measurements for an initial state prediction for the EKF
-    Eigen::MatrixXd initialState(2,1);
-    PointCloud::ConstPtr initialDetection1 {ros::topic::waitForMessage<PointCloud>("/velodyne_points")};
-    PointCloud::ConstPtr initialDetection2 {ros::topic::waitForMessage<PointCloud>("/velodyne_points")};
-    PointCloud::ConstPtr initialDetection3 {ros::topic::waitForMessage<PointCloud>("/velodyne_points")};
+    unsigned numInitialStateDetections {numInitialStateDetections};
+    Eigen::MatrixXd initialState = Eigen::MatrixXd::Zero(2,1);
 
-    initialState(0,0) = {(ransac(initialDetection1).lines.at(0).distance + ransac(initialDetection2).lines.at(0).distance + ransac(initialDetection3).lines.at(0).distance) / 3};
-    initialState(1,0) = {(ransac(initialDetection1).lines.at(0).theta + ransac(initialDetection2).lines.at(0).theta + ransac(initialDetection3).lines.at(0).theta) / 3};
+    for(int i{0}; i < numInitialStateDetections; i++) {
+        PointCloud::ConstPtr detection {ros::topic::waitForMessage<PointCloud>("/velodyne_points")};
+        lineGroup lines {ransac(detection)};
+        initialState(0,0) = initialState(0,0) + lines.lines.at(0).distance;
+        initialState(1,0) = initialState(1,0) + lines.lines.at(0).theta;
+    }
+
+    initialState(0,0) = initialState(0,0) / numInitialStateDetections;
+    initialState(1,0) = initialState(1,0) / numInitialStateDetections;
 
     filter = Kalman(0, 0, trueYaw, initialState, initialCovariance, modelError, measurementError);
 
@@ -503,10 +524,9 @@ int main(int argc, char **argv) {
     controller = PID(std::atof(argv[1]), std::atof(argv[2]), std::atof(argv[3]));
 
     controller.setInverted(false);
-    controller.setSetPoint(1.5);
-    controller.setOutputLimits(-0.4, 0.4);
-    controller.setMaxIOutput(0.2);
-
+    controller.setSetPoint(distanceBetweenRows / 2);
+    controller.setOutputLimits(-maxPIDOutput, maxPIDOutput);
+    controller.setMaxIOutput(maxIOutput);
 
     ros::Subscriber subOdom = n.subscribe<nav_msgs::Odometry>("/odometry/filtered", 50, odomCallback);
     ros::Subscriber subModelStates = n.subscribe<gazebo_msgs::ModelStates>("/gazebo/model_states", 50, modelStateCallback);
@@ -519,7 +539,6 @@ int main(int argc, char **argv) {
 
     // Actions to perform at the end of the program
     kalmanGraphing.close();
-    std::cout << "End of program" << std::endl;
 
     return 0;
 }

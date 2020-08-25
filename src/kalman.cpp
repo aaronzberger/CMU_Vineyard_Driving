@@ -21,7 +21,6 @@ Eigen::MatrixXd Kalman::filter(double deltaX, double deltaY, double theta, Eigen
     double deltaTheta {-lastRobotTheta + theta};
 
     //State Extrapolation
-    // This equation is used for distance when the robot's X and Y axes change with the angle of the robot:
     statePrediction(0,0) = stateUpdated(0,0) - ((deltaX * std::cos(stateUpdated(1,0))) + (deltaY * std::sin(stateUpdated(1,0))));
     statePrediction(1,0) = stateUpdated(1,0) - deltaTheta;
 
@@ -29,7 +28,6 @@ Eigen::MatrixXd Kalman::filter(double deltaX, double deltaY, double theta, Eigen
     Eigen::Matrix2d jacobian;
     jacobian << 1, (deltaX * std::sin(stateUpdated(1,0))) - (deltaY * std::cos(stateUpdated(1,0))),
                 0, 1;
-
 
     covPrediction = (jacobian * covUpdated * jacobian.transpose()) + modelError;
 
