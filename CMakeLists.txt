@@ -198,5 +198,7 @@ include_directories(
 ## Add folders to be run by python nosetests
 # catkin_add_nosetests(test)
 
+add_compile_options(-std=c++11)
+
 add_executable(wall_controller src/main.cpp)
 target_link_libraries(wall_controller ${catkin_LIBRARIES} ${PCL_LIBRARIES})

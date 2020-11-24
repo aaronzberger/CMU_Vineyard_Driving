@@ -17,30 +17,27 @@
 #include "pid.cpp"
 #include "kalman.h"
 #include "kalman.cpp"
-#include <png++/png.hpp>
 #include <Eigen/Dense>
 
 // USER PARAMETERS
 constexpr double distanceBetweenRows = 3.0;
 constexpr double inlierThreshold = 0.39;
 constexpr unsigned numRansacLoops = 250;
-constexpr double leftRowYInt = 1.5;
 
 constexpr double turningSpeed = 0.4;
 constexpr double drivingSpeed = 0.2;
 
-constexpr unsigned numInitialStateDetections = 15;
+constexpr unsigned numInitialStateDetections = 1;
 
 constexpr double maxPIDOutput = 0.4;
 constexpr double maxIOutput = 0.2;
 
 constexpr double initialCovarianceInput[2][2] = {{0.3, 0  },
                                                  {0  , 0.3}};
-constexpr double initialModelErrorInput[2][2] = {{0, 0},
-                                                 {0, 0}};
+constexpr double initialModelErrorInput[2][2] = {{0.02, 0},
+                                                 {0, 0.02}};
 constexpr double initialMeasurementErrorInput[2][2] = {{0.25, 0   },
                                                        {0   , 0.25}};
-
 
 typedef pcl::PointCloud<pcl::PointXYZ> PointCloud;
 
@@ -54,49 +51,34 @@ struct lineGroup {
     int totalInliers;
 };
 
-//For the world two_walls_3m.world, true line is below:
-line groundTruthLine;
-
 // Function Prototypes
-void clockCallback(const rosgraph_msgs::Clock::ConstPtr &msg);
 bool isGroundPoint(const pcl::PointXYZ &pt);
-void odomCallback(const nav_msgs::Odometry::ConstPtr &msg);
-void velodyneCallBack(const PointCloud::ConstPtr &pcl);
-void modelStateCallback(const gazebo_msgs::ModelStates::ConstPtr &msg);
-void displayLine(line line, float r, float g, float b, int id);
 double getYaw(double w, double x, double y, double z);
-lineGroup ransac(const PointCloud::ConstPtr &pcl);
+void odomCallback(const nav_msgs::Odometry::ConstPtr &msg);
+void displayLine(line line, float r, float g, float b, int id);
+double getSlope(line line);
+double getYInt(line line);
 bool close(line line1, line line2);
 double lineToPtDistance(double x, double y, line l);
 double lineToPtAngle(double x, double y, line l);
-double getSlope(line line);
-double getYInt(line line);
+line polarToStandard(double distance, double theta);
+void velodyneCallBack(const PointCloud::ConstPtr &pcl);
+lineGroup ransac(const PointCloud::ConstPtr &pcl);
 
-double currentTime, yaw, x, y, lastMotionUpdate;
-double trueX, trueY, trueYaw;
+double yaw, x, y;
+ros::Time lastMotionUpdate, startTime;
 ros::Publisher velPub, markerPub;
 PID controller;
 Kalman filter;
 int endOfRowCounter;
 int startOfRowCounter;
 bool turning;
-std::ofstream kalmanGraphing;
-int counter;
+int counter, counter1;
 bool firstLoop;
 Eigen::Matrix3d Tglobal_lastFrame;
+std::ofstream kalmanGraphing;
+line groundTruthLine;
 
-//Storing the past number of valid points for a moving average
-std::vector<int> numAheadPtsVec(49, -1);
-std::vector<double> lineTrackerFilter(5, -99);
-
-/**
- * @brief Updates the current time variable
- * 
- * @param msg the message received from the clock ros topic
- */
-void clockCallback(const rosgraph_msgs::Clock::ConstPtr &msg) {
-    currentTime = (msg->clock.sec * 1000) + int(msg->clock.nsec / 1e6);
-}
 
 /**
  * @brief Whether the point is a point not belonging to a wall
@@ -105,7 +87,8 @@ void clockCallback(const rosgraph_msgs::Clock::ConstPtr &msg) {
  * @return a boolean representing whether the point is not on a wall
  */
 bool isGroundPoint(const pcl::PointXYZ &pt) {
-    return (pt.z > -0.375 && pt.z < -0.365);
+    // return (pt.z > -0.375 && pt.z < -0.365);
+    return pt.z < 0.05;
 }
 
 /**
@@ -138,22 +121,6 @@ void odomCallback(const nav_msgs::Odometry::ConstPtr &msg) {
     y = msg->pose.pose.position.y;
 
     yaw = getYaw(msg->pose.pose.orientation.w, msg->pose.pose.orientation.x, msg->pose.pose.orientation.y, msg->pose.pose.orientation.z);
-}
-
-/**
- * @brief Update the trueX, trueY, and trueYaw global variables
- * 
- * @param msg the message received from the Gazebo model states ros topic
- */
-void modelStateCallback(const gazebo_msgs::ModelStates::ConstPtr &msg) {
-    unsigned idx {0};
-    for(int i{0}; i < msg->name.size(); i++) {
-        if(msg->name.at(i) == "/") idx = i;
-    }
-    trueX = {msg->pose.at(idx).position.x};
-    trueY = {msg->pose.at(idx).position.y};
-    
-    trueYaw = getYaw(msg->pose.at(idx).orientation.w, msg->pose.at(idx).orientation.x, msg->pose.at(idx).orientation.y, msg->pose.at(idx).orientation.z);
 }
 
 /**
@@ -206,7 +173,9 @@ void displayLine(line line, float r, float g, float b, int id) {
     marker.color.b = b;
     marker.color.a = 1.0;
 
-    marker.lifetime = ros::Duration();
+    marker.pose.orientation.w = 1;
+
+    marker.lifetime = ros::Duration(1.0);
     markerPub.publish(marker);
 }
 
@@ -239,8 +208,8 @@ double getYInt(line line) {
  * @return whether the two lines represent the same detected line
  */
 bool close(line line1, line line2) {
-    if(std::abs(-(line1.a/line1.b) - (-(line2.a/line2.b))) < 0.2) {
-        return (std::abs((line1.c/line1.b) - (line2.c/line2.b)) < 1.0);
+    if(std::abs(getSlope(line1) - (getSlope(line2))) < 0.2) {
+        return (std::abs(getYInt(line1) - getYInt(line2)) < 1.0);
     }
     return false;
 }
@@ -272,18 +241,39 @@ double lineToPtAngle(double x, double y, line l) {
 }
 
 /**
+ * @brief Determine the standard form of a line given a polar representation
+ * 
+ * @param distance the r to the line (distance from the origin)
+ * @param theta the theta to the line (angle from the origin)
+ * 
+ * @return a line containing correct a, b, and c values corresponding to the line represented by the method arguments
+ */
+line polarToStandard(double distance, double theta) {
+    line answer;
+    answer.distance = distance;
+    answer.theta = theta;
+    double slope = -1 / (std::tan(theta));
+    double yInt = -(distance * std::cos(theta)) * slope + (distance * std::sin(theta));
+    answer.a = (100 * slope + yInt) - (-100 * slope + yInt);
+    answer.b = -100 - 100;
+    answer.c = -((answer.a * -100) + (answer.b * (-100 * slope + yInt)));
+    return answer;
+}
+
+/**
  * @brief Update the output to the robot using Lidar data, through a PID controller
  * 
  * @param pcl the message received from the Lidar ros topic (velodyne)
  */
 void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
+    ros::Time currentTime = ros::Time::now();
     if(firstLoop) {
-        Tglobal_lastFrame << std::cos(-trueYaw), std::sin(-trueYaw), trueX,
-                            -std::sin(-trueYaw), std::cos(-trueYaw), trueY,
-                            0,                   0,                  1;
+        Tglobal_lastFrame << std::cos(-yaw), std::sin(-yaw), x,
+                            -std::sin(-yaw), std::cos(-yaw), y,
+                            0              , 0             , 1;
         firstLoop = false;
     }
-    else if(currentTime - lastMotionUpdate > 10) {
+    else if(currentTime.toSec() - lastMotionUpdate.toSec() > 0.1) {
         // Collect the detected lines from the RANSAC algorithm
         lineGroup lines {ransac(pcl)};
 
@@ -292,9 +282,9 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
 
         // Determine the transition model parameters for the EKF by changing the frame of reference from global to local
         Eigen::Matrix3d Tglobal_thisFrame;
-        Tglobal_thisFrame << std::cos(-trueYaw), std::sin(-trueYaw), trueX,
-                            -std::sin(-trueYaw), std::cos(-trueYaw), trueY,
-                            0,                   0,                  1;
+        Tglobal_thisFrame << std::cos(-yaw), std::sin(-yaw), x,
+                            -std::sin(-yaw), std::cos(-yaw), y,
+                            0              , 0             , 1;
         
         Eigen::Matrix3d TlastFrame_thisFrame;
         TlastFrame_thisFrame = Tglobal_lastFrame.inverse() * Tglobal_thisFrame;
@@ -304,17 +294,17 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
         
         // Pass the RANSAC output and odometry into an EKF for tracking (and smoothing)
         Eigen::MatrixXd outputState(2,1);
-        outputState = filter.filter(deltaX, deltaY, trueYaw, detectedState);
+        outputState = filter.filter(deltaX, deltaY, yaw, detectedState);
+
+        Tglobal_lastFrame = Tglobal_thisFrame;
 
         // Print data to a csv file for graphing and testing
         kalmanGraphing << counter << "," << lines.lines.at(0).distance << "," << lines.lines.at(0).theta << "," <<
                           outputState(0,0) << "," << outputState(1,0) << "," <<
-                          lineToPtDistance(trueX, trueY, groundTruthLine) - 0.1 << "," << M_PI_2 - trueYaw << "\n";
+                          lineToPtDistance(x, y, groundTruthLine) - 0.1 << "," << M_PI_2 - yaw << "\n";
         counter++;
 
-        Tglobal_lastFrame = Tglobal_thisFrame;
-
-        // Determine whethher to turn or drive
+        // Determine whether to turn or drive
         // Determine the ratio of points ahead of the robot
         int numValidPts {0};
         int numAheadPts {0};
@@ -326,6 +316,9 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
         }
         double aheadRatio {static_cast<double>(numAheadPts) / numValidPts};
 
+        // To use when always driving, never turning
+        // double aheadRatio {0.5};
+
         // Decide if we should switch modes
         if(!turning) {
             if(aheadRatio < 0.2) endOfRowCounter++;
@@ -333,6 +326,7 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
                 // Execute if robot is driving and should now start turning
                 turning = true;
                 endOfRowCounter = 0;
+                ROS_INFO("START TURNING MODE");
             }
         } else {
             if(aheadRatio > 0.75) startOfRowCounter++;
@@ -340,6 +334,7 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
                 // Execute if robot is turning and should now start driving
                 turning = false;
                 startOfRowCounter = 0;
+                ROS_INFO("START DRIVING MODE");
                 ros::Duration(1.0).sleep();
             }
         }
@@ -348,33 +343,40 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
             // Construct a velocity message to give to the Husky based on basic constant angular velocity turning
             geometry_msgs::Twist twist;
 
-            twist.linear.x = turningSpeed - 0.1;
+            // twist.linear.x = turningSpeed - 0.1;
+            twist.linear.x = 0.0;
+
             twist.linear.y = 0;
             twist.linear.z = 0;
 
             twist.angular.x = 0;
             twist.angular.y = 0;
-            twist.angular.z = turningSpeed / (distanceBetweenRows / 2);
+            // twist.angular.z = turningSpeed / (distanceBetweenRows / 2);
+            twist.angular.z = 0;
 
             velPub.publish(twist);
             lastMotionUpdate = currentTime;
 
         } else if(!(lines.lines.size() == 0)) {
-            // Display the originally detected line on the left in blue
-            displayLine(lines.lines.at(0), 0, 0, 1, 2);
+            // Display the originally detected line
+            // displayLine(lines.lines.at(0), 0, 0, 1, 1);
+
+            // Display the line from the Kalman Filter
+            displayLine(polarToStandard(outputState(0,0), outputState(1,0));, 0, 0, 1, 2);
 
             //Run the PID controller
-            std::cout << "Distance to wall: " << outputState(0,0) << std::endl;
-
             double angVel {controller.calculate(outputState(0,0), currentTime)};
             
+            std::cout << "Distance to wall: " << outputState(0,0) << std::endl;
             std::cout << "PID Output: " << angVel << std::endl;
             std::cout << "---------------------------" << std::endl;
 
             //Construct a velocity message to give to the Husky
             geometry_msgs::Twist twist;
 
+            // twist.linear.x = drivingSpeed;
             twist.linear.x = drivingSpeed;
+
             twist.linear.y = 0;
             twist.linear.z = 0;
 
@@ -441,26 +443,30 @@ lineGroup ransac(const PointCloud::ConstPtr &pcl) {
             currentLineGroup.lines.push_back(currentLine);
             currentLineGroup.totalInliers = currentLine.inliers;
 
+            // TODO:
+            // I'm still unsure of whether I'm going to use lineGroups or just single lines to determine the best one. This will still be relevant
+            // when implementing the U-Net row detector.
+
             // Construct a complementary line that is parallel to the original line and add it to the line group (this is the row to the right)
-            line rightLine;
-            rightLine.a = currentLine.a;
-            rightLine.b = currentLine.b;
-            rightLine.c = -(distanceBetweenRows * currentLine.b) + currentLine.c;
+            // line rightLine;
+            // rightLine.a = currentLine.a;
+            // rightLine.b = currentLine.b;
+            // rightLine.c = -(distanceBetweenRows * currentLine.b) + currentLine.c;
 
             // Determine the number of inliers in the line
-            rightLine.inliers = 0;
-            for(int j{0}; j < pcl->width; j++) {
-                if(!isGroundPoint(pcl->points.at(j))) {
-                    double distance {lineToPtDistance(pcl->points.at(j).x, pcl->points.at(j).y, rightLine)};
-                    if(std::abs(distance) <= inlierThreshold) rightLine.inliers++;
-                }
-            }
+            // rightLine.inliers = 0;
+            // for(int j{0}; j < pcl->width; j++) {
+            //     if(!isGroundPoint(pcl->points.at(j))) {
+            //         double distance {lineToPtDistance(pcl->points.at(j).x, pcl->points.at(j).y, rightLine)};
+            //         if(std::abs(distance) <= inlierThreshold) rightLine.inliers++;
+            //     }
+            // }
 
             // Determine the current distance and angle to the line
-            rightLine.distance = lineToPtDistance(0, 0, rightLine);
-            rightLine.theta = lineToPtAngle(0, 0, rightLine);
+            // rightLine.distance = lineToPtDistance(0, 0, rightLine);
+            // rightLine.theta = lineToPtAngle(0, 0, rightLine);
 
-            currentLineGroup.lines.push_back(rightLine);
+            // currentLineGroup.lines.push_back(rightLine);
             //currentLineGroup.totalInliers += rightLine.inliers;
 
             // Determine if this is the best line group
@@ -468,10 +474,13 @@ lineGroup ransac(const PointCloud::ConstPtr &pcl) {
         }
     }
     return bestLineGroup;
+
 }
 
 int main(int argc, char **argv) {
     ros::init(argc, argv, "wall_controller");
+
+    ROS_INFO("Starting wall_controller node");
 
     if(argc != 4) {
         std::cout << "Expected 3 arguments: P, I, D" << std::endl;
@@ -480,37 +489,47 @@ int main(int argc, char **argv) {
 
     ros::NodeHandle n;
 
-    // Initialize ground truth for simulations
-    groundTruthLine.a = 0;
-    groundTruthLine.b = 1;
-    groundTruthLine.c = -leftRowYInt;
-
     // For storing values to determine turning or driving mode
     endOfRowCounter = 0;
     startOfRowCounter = 0;
-
-    // For printing a csv file for graphing
     counter = 0;
-    kalmanGraphing = std::ofstream("kalmanGraphing.csv");
-
     firstLoop = true;
+
+    // Use the ground truth wall data to compare filtered results from the Kalman filter with truth data
+    groundTruthLine.a = 0;
+    groundTruthLine.b = 1;
+    groundTruthLine.c = -1.5;
+
+    kalmanGraphing = std::ofstream("kalmanGraphing.csv");
 
     // Seed the STL random number generation with the current time
     std::srand(std::time(nullptr));
 
     //Kalman Filter Setup
-    Eigen::Matrix2d initialCovariance(initialCovarianceInput), modelError(initialModelErrorInput), measurementError(initialMeasurementErrorInput);
+    Eigen::Matrix2d initialCovariance, modelError, measurementError;
+
+    initialCovariance << initialCovarianceInput[0][0], initialCovarianceInput[0][1],
+                         initialCovarianceInput[1][0], initialCovarianceInput[1][1];
+
+    modelError << initialModelErrorInput[0][0], initialModelErrorInput[0][1],
+                  initialModelErrorInput[1][0], initialModelErrorInput[1][1];
+
+    measurementError << initialMeasurementErrorInput[0][0], initialMeasurementErrorInput[0][1],
+                        initialMeasurementErrorInput[1][0], initialMeasurementErrorInput[1][1];
+
+    ROS_INFO("Collecting and Setting Initial Odometry");
 
     // Find the initial robot odometry so the EKF can be initialized properly
-    gazebo_msgs::ModelStates::ConstPtr initialOdom {ros::topic::waitForMessage<gazebo_msgs::ModelStates>("/gazebo/model_states")};
-    modelStateCallback(initialOdom);
+    nav_msgs::Odometry::ConstPtr initialOdom = {ros::topic::waitForMessage<nav_msgs::Odometry>("/odometry/filtered")};
+    odomCallback(initialOdom);
 
-    unsigned numInitialStateDetections {numInitialStateDetections};
+    ROS_INFO("Running Initial State Detections");
+
     Eigen::MatrixXd initialState = Eigen::MatrixXd::Zero(2,1);
 
     for(int i{0}; i < numInitialStateDetections; i++) {
-        PointCloud::ConstPtr detection {ros::topic::waitForMessage<PointCloud>("/velodyne_points")};
-        lineGroup lines {ransac(detection)};
+        PointCloud::ConstPtr pcl {ros::topic::waitForMessage<PointCloud>("/velodyne_points")};
+        lineGroup lines {ransac(pcl)};
         initialState(0,0) = initialState(0,0) + lines.lines.at(0).distance;
         initialState(1,0) = initialState(1,0) + lines.lines.at(0).theta;
     }
@@ -518,7 +537,8 @@ int main(int argc, char **argv) {
     initialState(0,0) = initialState(0,0) / numInitialStateDetections;
     initialState(1,0) = initialState(1,0) / numInitialStateDetections;
 
-    filter = Kalman(0, 0, trueYaw, initialState, initialCovariance, modelError, measurementError);
+    // Kalman Filter setup
+    filter = Kalman(x, y, yaw, initialState, initialCovariance, modelError, measurementError);
 
     // PID Controller setup
     controller = PID(std::atof(argv[1]), std::atof(argv[2]), std::atof(argv[3]));
@@ -528,17 +548,19 @@ int main(int argc, char **argv) {
     controller.setOutputLimits(-maxPIDOutput, maxPIDOutput);
     controller.setMaxIOutput(maxIOutput);
 
+    lastMotionUpdate = startTime = ros::Time::now();
+
+    // Setup pubs and subs
     ros::Subscriber subOdom = n.subscribe<nav_msgs::Odometry>("/odometry/filtered", 50, odomCallback);
-    ros::Subscriber subModelStates = n.subscribe<gazebo_msgs::ModelStates>("/gazebo/model_states", 50, modelStateCallback);
-    ros::Subscriber subClock = n.subscribe<rosgraph_msgs::Clock>("/clock", 50, clockCallback);
     ros::Subscriber subVelodyne = n.subscribe<PointCloud>("/velodyne_points", 50, velodyneCallBack);
     velPub = n.advertise<geometry_msgs::Twist>("/cmd_vel", 1);
     markerPub = n.advertise<visualization_msgs::Marker>("/visualization_marker", 1);
+
+    ROS_INFO("Finished Setup, Starting Spinning");
 
     ros::spin();
 
     // Actions to perform at the end of the program
     kalmanGraphing.close();
-
     return 0;
 }

@@ -121,7 +121,7 @@ void PID::setInverted(bool inverted) {
  * @param time the current time (the controller handles difference in time)
  * @return the output from the controller
  */
-double PID::calculate(double sensorData, double setPoint, double time) {
+double PID::calculate(double sensorData, double setPoint, ros::Time time) {
     if(firstLoop) {
         lastSensorData = sensorData;
         lastTime = time;
@@ -131,7 +131,7 @@ double PID::calculate(double sensorData, double setPoint, double time) {
     }
 
     this->setPoint = setPoint;
-    double dt = (time - lastTime) / 1000;
+    double dt = (time - lastTime).toSec();
 
     double error = sensorData - setPoint;
 
@@ -170,7 +170,7 @@ double PID::calculate(double sensorData, double setPoint, double time) {
  * @param time the current time (the controller handles difference in time)
  * @return the output from the controller
  */
-double PID::calculate(double sensorData, double time) {
+double PID::calculate(double sensorData, ros::Time time) {
     calculate(sensorData, this->setPoint, time);
 }
 

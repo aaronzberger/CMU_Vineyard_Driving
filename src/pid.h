@@ -19,8 +19,8 @@ public:
     void setSetPoint(double setPoint);
     void setInverted(bool inverted);
 
-    double calculate(double sensorData, double setPoint, double dt);
-    double calculate(double sensorData, double dt);
+    double calculate(double sensorData, double setPoint, ros::Time time);
+    double calculate(double sensorData, ros::Time time);
 
 private:
     void checkGainSigns();
@@ -45,7 +45,7 @@ private:
     bool inverted;
 
     double lastSensorData;
-    double lastTime;
+    ros::Time lastTime;
 };
 
 #endif
