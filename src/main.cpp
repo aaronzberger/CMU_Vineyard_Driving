@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <cmath>
+#include <algorithm>
 #include "ros/ros.h"
 #include "nav_msgs/Odometry.h"
 #include "rosgraph_msgs/Clock.h"
@@ -27,7 +28,7 @@ constexpr unsigned numRansacLoops = 250;
 constexpr double turningSpeed = 0.4;
 constexpr double drivingSpeed = 0.2;
 
-constexpr unsigned numInitialStateDetections = 1;
+constexpr unsigned numInitialStateDetections = 5;
 
 constexpr double maxPIDOutput = 0.4;
 constexpr double maxIOutput = 0.2;
@@ -38,6 +39,18 @@ constexpr double initialModelErrorInput[2][2] = {{0.02, 0},
                                                  {0, 0.02}};
 constexpr double initialMeasurementErrorInput[2][2] = {{0.25, 0   },
                                                        {0   , 0.25}};
+
+constexpr double groundPointThreshold = 0.05;
+
+// Proportion of points that are ahead of the robot
+constexpr double endOfRowRatio = 0.2;
+constexpr double startOfRowRatio = 0.75;
+
+// Number of times the above threshold is met before switching modes
+constexpr int endOfRowThreshold = 20;
+constexpr int startOfRowThreshold = 20;
+
+constexpr double maxTimeBetweenVeloUpdates = 1.5;
 
 typedef pcl::PointCloud<pcl::PointXYZ> PointCloud;
 
@@ -58,26 +71,42 @@ void odomCallback(const nav_msgs::Odometry::ConstPtr &msg);
 void displayLine(line line, float r, float g, float b, int id);
 double getSlope(line line);
 double getYInt(line line);
-bool close(line line1, line line2);
 double lineToPtDistance(double x, double y, line l);
 double lineToPtAngle(double x, double y, line l);
 line polarToStandard(double distance, double theta);
 void velodyneCallBack(const PointCloud::ConstPtr &pcl);
 lineGroup ransac(const PointCloud::ConstPtr &pcl);
 
+// Robot odometry
 double yaw, x, y;
-ros::Time lastMotionUpdate, startTime;
-ros::Publisher velPub, markerPub;
+
+ros::Time lastMotionUpdate;
+ros::Publisher markerPub;
+
 PID controller;
 Kalman filter;
+
 int endOfRowCounter;
 int startOfRowCounter;
 bool turning;
-int counter, counter1;
-bool firstLoop;
-Eigen::Matrix3d Tglobal_lastFrame;
+
+// So the robot knows which way to go down the row (true until robot turns into the second row)
+bool directionForward;
+
+// For csv writing
 std::ofstream kalmanGraphing;
+int counter;
+
+bool firstLidarCallback;
+
+// For determining the current odometry in a local frame, the last global frame must be stored
+Eigen::Matrix3d Tglobal_lastFrame;
+
 line groundTruthLine;
+
+// Globally store the current message and update it from within every method so frequency of publishing is constant
+geometry_msgs::Twist currentVelocityMessage;
+ros::Time lastVelocityUpdate;
 
 
 /**
@@ -87,8 +116,7 @@ line groundTruthLine;
  * @return a boolean representing whether the point is not on a wall
  */
 bool isGroundPoint(const pcl::PointXYZ &pt) {
-    // return (pt.z > -0.375 && pt.z < -0.365);
-    return pt.z < 0.05;
+    return pt.z < groundPointThreshold;
 }
 
 /**
@@ -200,21 +228,6 @@ double getYInt(line line) {
 }
 
 /**
- * @brief Determine if two lines are too close to be different lines
- * 
- * @param line1 the first line
- * @param line2 the second line
- * 
- * @return whether the two lines represent the same detected line
- */
-bool close(line line1, line line2) {
-    if(std::abs(getSlope(line1) - (getSlope(line2))) < 0.2) {
-        return (std::abs(getYInt(line1) - getYInt(line2)) < 1.0);
-    }
-    return false;
-}
-
-/**
  * @brief Determine the distance from a point to a line in standard form
  * 
  * @param x the x of the point
@@ -261,50 +274,51 @@ line polarToStandard(double distance, double theta) {
 }
 
 /**
+ * @brief Start or reset the Kalman filter
+ */
+void startKalmanFilter() {
+    // Input matrices
+    Eigen::Matrix2d initialCovariance, modelError, measurementError;
+
+    initialCovariance << initialCovarianceInput[0][0], initialCovarianceInput[0][1],
+                         initialCovarianceInput[1][0], initialCovarianceInput[1][1];
+
+    modelError << initialModelErrorInput[0][0], initialModelErrorInput[0][1],
+                  initialModelErrorInput[1][0], initialModelErrorInput[1][1];
+
+    measurementError << initialMeasurementErrorInput[0][0], initialMeasurementErrorInput[0][1],
+                        initialMeasurementErrorInput[1][0], initialMeasurementErrorInput[1][1];
+
+    // Find the initial state so the transition matrix can begin
+    Eigen::MatrixXd initialState = Eigen::MatrixXd::Zero(2,1);
+
+    for(int i{0}; i < numInitialStateDetections; i++) {
+        PointCloud::ConstPtr pcl {ros::topic::waitForMessage<PointCloud>("/velodyne_points")};
+        lineGroup lines {ransac(pcl)};
+        initialState(0,0) = initialState(0,0) + lines.lines.at(0).distance;
+        initialState(1,0) = initialState(1,0) + lines.lines.at(0).theta;
+    }
+
+    initialState(0,0) = initialState(0,0) / numInitialStateDetections;
+    initialState(1,0) = initialState(1,0) / numInitialStateDetections;
+
+    filter = Kalman(x, y, yaw, initialState, initialCovariance, modelError, measurementError);
+}
+
+/**
  * @brief Update the output to the robot using Lidar data, through a PID controller
  * 
- * @param pcl the message received from the Lidar ros topic (velodyne)
+ * @param pcl the message received from the Lidar ros topic ("/velodyne_points")
  */
 void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
     ros::Time currentTime = ros::Time::now();
-    if(firstLoop) {
+    if(firstLidarCallback) {
         Tglobal_lastFrame << std::cos(-yaw), std::sin(-yaw), x,
                             -std::sin(-yaw), std::cos(-yaw), y,
                             0              , 0             , 1;
-        firstLoop = false;
+        firstLidarCallback = false;
     }
     else if(currentTime.toSec() - lastMotionUpdate.toSec() > 0.1) {
-        // Collect the detected lines from the RANSAC algorithm
-        lineGroup lines {ransac(pcl)};
-
-        Eigen::MatrixXd detectedState(2,1);
-        detectedState << lines.lines.at(0).distance, lines.lines.at(0).theta;
-
-        // Determine the transition model parameters for the EKF by changing the frame of reference from global to local
-        Eigen::Matrix3d Tglobal_thisFrame;
-        Tglobal_thisFrame << std::cos(-yaw), std::sin(-yaw), x,
-                            -std::sin(-yaw), std::cos(-yaw), y,
-                            0              , 0             , 1;
-        
-        Eigen::Matrix3d TlastFrame_thisFrame;
-        TlastFrame_thisFrame = Tglobal_lastFrame.inverse() * Tglobal_thisFrame;
-
-        double deltaX {TlastFrame_thisFrame(0,2)};
-        double deltaY {TlastFrame_thisFrame(1,2)};
-        
-        // Pass the RANSAC output and odometry into an EKF for tracking (and smoothing)
-        Eigen::MatrixXd outputState(2,1);
-        outputState = filter.filter(deltaX, deltaY, yaw, detectedState);
-
-        Tglobal_lastFrame = Tglobal_thisFrame;
-
-        // Print data to a csv file for graphing and testing
-        kalmanGraphing << counter << "," << lines.lines.at(0).distance << "," << lines.lines.at(0).theta << "," <<
-                          outputState(0,0) << "," << outputState(1,0) << "," <<
-                          lineToPtDistance(x, y, groundTruthLine) - 0.1 << "," << M_PI_2 - yaw << "\n";
-        counter++;
-
-        // Determine whether to turn or drive
         // Determine the ratio of points ahead of the robot
         int numValidPts {0};
         int numAheadPts {0};
@@ -316,79 +330,112 @@ void velodyneCallBack(const PointCloud::ConstPtr &pcl) {
         }
         double aheadRatio {static_cast<double>(numAheadPts) / numValidPts};
 
-        // To use when always driving, never turning
-        // double aheadRatio {0.5};
-
         // Decide if we should switch modes
         if(!turning) {
-            if(aheadRatio < 0.2) endOfRowCounter++;
-            if(endOfRowCounter > 20) {
+            if(aheadRatio < endOfRowRatio) endOfRowCounter++;
+            else if (endOfRowCounter > 0) endOfRowCounter--;
+            if(endOfRowCounter > endOfRowThreshold) {
                 // Execute if robot is driving and should now start turning
                 turning = true;
                 endOfRowCounter = 0;
                 ROS_INFO("START TURNING MODE");
             }
         } else {
-            if(aheadRatio > 0.75) startOfRowCounter++;
-            if(startOfRowCounter > 20) {
+            if(aheadRatio > startOfRowRatio) startOfRowCounter++;
+            else if (startOfRowCounter > 0) startOfRowCounter--;
+            if(startOfRowCounter > startOfRowThreshold) {
                 // Execute if robot is turning and should now start driving
                 turning = false;
+                directionForward = !directionForward;
                 startOfRowCounter = 0;
+                ros::spinOnce();
+                startKalmanFilter();
+                ros::Duration(0.3).sleep();
                 ROS_INFO("START DRIVING MODE");
-                ros::Duration(1.0).sleep();
             }
         }
 
         if(turning) {
-            // Construct a velocity message to give to the Husky based on basic constant angular velocity turning
+            // Construct a velocity message to give to the Husky based on constant angular velocity turning
             geometry_msgs::Twist twist;
 
-            // twist.linear.x = turningSpeed - 0.1;
-            twist.linear.x = 0.0;
-
+            twist.linear.x = turningSpeed - 0.1;
             twist.linear.y = 0;
             twist.linear.z = 0;
 
             twist.angular.x = 0;
             twist.angular.y = 0;
-            // twist.angular.z = turningSpeed / (distanceBetweenRows / 2);
-            twist.angular.z = 0;
+            twist.angular.z = turningSpeed / (distanceBetweenRows / 2);
 
-            velPub.publish(twist);
-            lastMotionUpdate = currentTime;
-
-        } else if(!(lines.lines.size() == 0)) {
-            // Display the originally detected line
-            // displayLine(lines.lines.at(0), 0, 0, 1, 1);
-
-            // Display the line from the Kalman Filter
-            displayLine(polarToStandard(outputState(0,0), outputState(1,0));, 0, 0, 1, 2);
-
-            //Run the PID controller
-            double angVel {controller.calculate(outputState(0,0), currentTime)};
-            
-            std::cout << "Distance to wall: " << outputState(0,0) << std::endl;
-            std::cout << "PID Output: " << angVel << std::endl;
-            std::cout << "---------------------------" << std::endl;
-
-            //Construct a velocity message to give to the Husky
-            geometry_msgs::Twist twist;
-
-            // twist.linear.x = drivingSpeed;
-            twist.linear.x = drivingSpeed;
-
-            twist.linear.y = 0;
-            twist.linear.z = 0;
-
-            twist.angular.x = 0;
-            twist.angular.y = 0;
-            twist.angular.z = angVel;
-
-            velPub.publish(twist);
-            lastMotionUpdate = currentTime;
+            currentVelocityMessage = twist;
+            lastMotionUpdate = lastVelocityUpdate = currentTime;
         } else {
-            std::cout << "Size " << lines.lines.size() << " Inliers " << lines.totalInliers << std::endl;
-            std::cout << "NO LINE GROUP FOUND" << std::endl;
+            // Collect the detected lines from the RANSAC algorithm
+            lineGroup lines {ransac(pcl)};
+
+            Eigen::MatrixXd detectedState(2,1);
+            detectedState << lines.lines.at(0).distance, lines.lines.at(0).theta;
+
+            // Determine the transition model parameters for the EKF by changing the frame of reference from global to local
+            Eigen::Matrix3d Tglobal_thisFrame;
+            Tglobal_thisFrame << std::cos(-yaw), std::sin(-yaw), x,
+                                -std::sin(-yaw), std::cos(-yaw), y,
+                                0              , 0             , 1;
+            
+            Eigen::Matrix3d TlastFrame_thisFrame;
+            TlastFrame_thisFrame = Tglobal_lastFrame.inverse() * Tglobal_thisFrame;
+
+            double deltaX {TlastFrame_thisFrame(0,2)};
+            double deltaY {TlastFrame_thisFrame(1,2)};
+            
+            // Pass the RANSAC output and odometry into an EKF for tracking (and smoothing)
+            Eigen::MatrixXd outputState(2,1);
+            outputState = filter.filter(deltaX, deltaY, yaw, detectedState);
+
+            Tglobal_lastFrame = Tglobal_thisFrame;
+
+            // Print data to a csv file for graphing and testing
+            kalmanGraphing << counter << "," << lines.lines.at(0).distance << "," << lines.lines.at(0).theta << "," <<
+                            outputState(0,0) << "," << outputState(1,0) << "," <<
+                            lineToPtDistance(x, y, groundTruthLine) - 0.1 << "," << M_PI_2 - yaw << "\n";
+            counter++;
+
+            if(!(lines.lines.size() == 0)) {
+                // Display the line from the Kalman Filter
+                displayLine(polarToStandard(outputState(0,0), outputState(1,0)), 0, 0, 1, 2);
+
+                // Determine the desired angle of the robot based on distance from the middle
+                double desiredAngle {((outputState(0,0) - (distanceBetweenRows / 2)) / (distanceBetweenRows / 2))};
+
+                double tempYaw = yaw;
+
+                // If the robot is driving the other direction, rotate the desired angle by 180 degrees
+                if(!directionForward) {
+                    tf::Quaternion q_current = tf::createQuaternionFromYaw(yaw);
+                    tf::Quaternion q_rotation = tf::createQuaternionFromRPY(0, 0, M_PI);
+                    tempYaw = tf::getYaw(q_current * q_rotation);
+                }
+
+                // Use a PID to get the robot to the desired angle, given the current angle
+                controller.setSetPoint(desiredAngle);
+                double angVel {controller.calculate(tempYaw, currentTime)};
+
+                //Construct a velocity message to give to the Husky
+                geometry_msgs::Twist twist;
+
+                twist.linear.x = drivingSpeed;
+                twist.linear.y = 0;
+                twist.linear.z = 0;
+
+                twist.angular.x = 0;
+                twist.angular.y = 0;
+                twist.angular.z = angVel;
+
+                currentVelocityMessage = twist;
+                lastMotionUpdate = lastVelocityUpdate = currentTime;
+            } else {
+                ROS_INFO("No Valid Line Group Found by RANSAC! Skipping this loop");
+            }
         }
     }
 }
@@ -493,7 +540,8 @@ int main(int argc, char **argv) {
     endOfRowCounter = 0;
     startOfRowCounter = 0;
     counter = 0;
-    firstLoop = true;
+    firstLidarCallback = true;
+    directionForward = true;
 
     // Use the ground truth wall data to compare filtered results from the Kalman filter with truth data
     groundTruthLine.a = 0;
@@ -506,59 +554,49 @@ int main(int argc, char **argv) {
     std::srand(std::time(nullptr));
 
     //Kalman Filter Setup
-    Eigen::Matrix2d initialCovariance, modelError, measurementError;
-
-    initialCovariance << initialCovarianceInput[0][0], initialCovarianceInput[0][1],
-                         initialCovarianceInput[1][0], initialCovarianceInput[1][1];
-
-    modelError << initialModelErrorInput[0][0], initialModelErrorInput[0][1],
-                  initialModelErrorInput[1][0], initialModelErrorInput[1][1];
-
-    measurementError << initialMeasurementErrorInput[0][0], initialMeasurementErrorInput[0][1],
-                        initialMeasurementErrorInput[1][0], initialMeasurementErrorInput[1][1];
-
-    ROS_INFO("Collecting and Setting Initial Odometry");
-
-    // Find the initial robot odometry so the EKF can be initialized properly
+    // Set the initial robot odometry since ROS has not yet spun, and no odometry has yet been collected
     nav_msgs::Odometry::ConstPtr initialOdom = {ros::topic::waitForMessage<nav_msgs::Odometry>("/odometry/filtered")};
     odomCallback(initialOdom);
 
-    ROS_INFO("Running Initial State Detections");
-
-    Eigen::MatrixXd initialState = Eigen::MatrixXd::Zero(2,1);
-
-    for(int i{0}; i < numInitialStateDetections; i++) {
-        PointCloud::ConstPtr pcl {ros::topic::waitForMessage<PointCloud>("/velodyne_points")};
-        lineGroup lines {ransac(pcl)};
-        initialState(0,0) = initialState(0,0) + lines.lines.at(0).distance;
-        initialState(1,0) = initialState(1,0) + lines.lines.at(0).theta;
-    }
-
-    initialState(0,0) = initialState(0,0) / numInitialStateDetections;
-    initialState(1,0) = initialState(1,0) / numInitialStateDetections;
-
-    // Kalman Filter setup
-    filter = Kalman(x, y, yaw, initialState, initialCovariance, modelError, measurementError);
+    startKalmanFilter();
 
     // PID Controller setup
     controller = PID(std::atof(argv[1]), std::atof(argv[2]), std::atof(argv[3]));
 
-    controller.setInverted(false);
-    controller.setSetPoint(distanceBetweenRows / 2);
+    controller.setInverted(true);
+    controller.setSetPoint(directionForward ? 0 : M_PI);
     controller.setOutputLimits(-maxPIDOutput, maxPIDOutput);
     controller.setMaxIOutput(maxIOutput);
 
-    lastMotionUpdate = startTime = ros::Time::now();
+    lastMotionUpdate = ros::Time::now();
 
     // Setup pubs and subs
     ros::Subscriber subOdom = n.subscribe<nav_msgs::Odometry>("/odometry/filtered", 50, odomCallback);
     ros::Subscriber subVelodyne = n.subscribe<PointCloud>("/velodyne_points", 50, velodyneCallBack);
-    velPub = n.advertise<geometry_msgs::Twist>("/cmd_vel", 1);
+    ros::Publisher velPub = n.advertise<geometry_msgs::Twist>("/cmd_vel", 1);
     markerPub = n.advertise<visualization_msgs::Marker>("/visualization_marker", 1);
 
     ROS_INFO("Finished Setup, Starting Spinning");
 
-    ros::spin();
+    geometry_msgs::Twist zeroVelocity;
+    zeroVelocity.linear.x = 0;
+    zeroVelocity.linear.y = 0;
+    zeroVelocity.linear.z = 0;
+    zeroVelocity.angular.x = 0;
+    zeroVelocity.angular.y = 0;
+    zeroVelocity.angular.z = 0;
+
+    currentVelocityMessage = zeroVelocity;
+    lastVelocityUpdate = ros::Time::now();
+
+    while(ros::ok()) {
+        if((ros::Time::now() - lastVelocityUpdate).toSec() > maxTimeBetweenVeloUpdates) velPub.publish(zeroVelocity);
+        else velPub.publish(currentVelocityMessage);
+        ros::spinOnce();
+        std::cout << directionForward << std::endl;
+    }
+
+    ROS_INFO("ROS Stopped. Ending Node");
 
     // Actions to perform at the end of the program
     kalmanGraphing.close();

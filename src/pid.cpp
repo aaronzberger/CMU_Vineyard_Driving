@@ -141,11 +141,11 @@ double PID::calculate(double sensorData, double setPoint, ros::Time time) {
     //Calculate I
     integral += (error * dt);
 
-    integral = clamp(integral, -maxError, maxError);
-    
+    integral = clamp(integral, -std::abs(maxError), std::abs(maxError));
+
     double iOutput{kI * integral};
 
-    iOutput = clamp(iOutput, -maxIOutput, maxIOutput);
+    iOutput = clamp(iOutput, -std::abs(maxIOutput), std::abs(maxIOutput));
 
     //Calculate D
     double derivative{(sensorData - lastSensorData) / dt};
@@ -157,8 +157,6 @@ double PID::calculate(double sensorData, double setPoint, ros::Time time) {
     
     this->lastSensorData = sensorData;
     this->lastTime = time;
-
-    std::cout << "P: " << pOutput << " I: " << iOutput << " D: " << dOutput << std::endl;
 
     return totalOutput;
 }
